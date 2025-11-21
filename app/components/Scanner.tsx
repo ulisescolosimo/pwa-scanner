@@ -1,0 +1,865 @@
+'use client'
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { Html5Qrcode } from 'html5-qrcode'
+import { useTicketStore } from '@/lib/ticketStore'
+import { playSuccessSound } from '@/utils/sound'
+import type { Ticket } from '@/types/ticket'
+
+interface ScanResult {
+  ticket: Ticket | null
+  status: 'available' | 'used' | 'not_found'
+  scannedAt: string
+}
+
+interface HistoryItem extends ScanResult {
+  qrCode: string
+}
+
+const OPERATORS_STORAGE_KEY = 'scanner_operators'
+const SELECTED_OPERATOR_KEY = 'selected_operator'
+
+export default function Scanner() {
+  const scannerRef = useRef<Html5Qrcode | null>(null)
+  const qrCodeRegionRef = useRef<HTMLDivElement>(null)
+  const isInitializingRef = useRef(false)
+  const [cameraState, setCameraState] = useState<'idle' | 'starting' | 'active' | 'paused'>('idle')
+  const [scannedBy, setScannedBy] = useState('')
+  const [operators, setOperators] = useState<string[]>([])
+  const [showAddOperator, setShowAddOperator] = useState(false)
+  const [newOperatorName, setNewOperatorName] = useState('')
+  const [isOperatorDropdownOpen, setIsOperatorDropdownOpen] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  const [lastScan, setLastScan] = useState<ScanResult | null>(null)
+  const [history, setHistory] = useState<HistoryItem[]>([])
+  const [manualCode, setManualCode] = useState('')
+  const [showManual, setShowManual] = useState(false)
+  const [lastScanTime, setLastScanTime] = useState(0)
+  
+  const { findByIdentifier, markLocallyUsed, isOnline, pendingCount, syncPendingUses } = useTicketStore()
+  
+  // Cargar historial de tickets usados desde IndexedDB
+  const loadUsedTicketsHistory = useCallback(async () => {
+    try {
+      const { db } = await import('@/lib/db')
+      // Obtener TODOS los tickets y filtrar los usados manualmente
+      // Esto es más confiable que usar el índice ya que puede haber problemas con tipos
+      const allTickets = await db.tickets.toArray()
+      
+      // Filtrar todos los tickets usados (verificar múltiples formatos)
+      const usedTickets = allTickets.filter(ticket => {
+        const isUsed = ticket.is_used
+        // Manejar diferentes formatos: boolean, string, number
+        if (typeof isUsed === 'boolean') {
+          return isUsed === true
+        }
+        if (typeof isUsed === 'string') {
+          return isUsed === 'true' || isUsed === '1'
+        }
+        if (typeof isUsed === 'number') {
+          return isUsed === 1
+        }
+        return false
+      })
+      
+      console.log(`Cargando historial: ${usedTickets.length} tickets usados de ${allTickets.length} totales`)
+      
+      // Convertir todos los tickets usados a HistoryItem
+      const historyItems: HistoryItem[] = usedTickets
+        .map(ticket => ({
+          ticket,
+          status: 'used' as const,
+          scannedAt: ticket.used_at || ticket.updated_at || ticket.created_at,
+          qrCode: ticket.qr_code
+        }))
+        .sort((a, b) => {
+          // Ordenar por fecha de uso, más reciente primero
+          const dateA = new Date(a.scannedAt).getTime()
+          const dateB = new Date(b.scannedAt).getTime()
+          return dateB - dateA
+        })
+      
+      setHistory(historyItems)
+    } catch (error) {
+      console.error('Error loading used tickets history:', error)
+    }
+  }, [])
+  
+  // Cargar historial al iniciar y después de un delay para asegurar que el snapshot se haya completado
+  useEffect(() => {
+    // Esperar un momento para asegurar que el snapshot se haya completado
+    const timer = setTimeout(() => {
+      loadUsedTicketsHistory()
+    }, 1000) // 1 segundo de delay
+
+    return () => clearTimeout(timer)
+  }, [loadUsedTicketsHistory])
+
+  // Recargar historial periódicamente y cuando cambia el estado online
+  useEffect(() => {
+    if (!isOnline) return
+
+    const interval = setInterval(() => {
+      loadUsedTicketsHistory()
+    }, 10000) // Recargar cada 10 segundos
+
+    return () => clearInterval(interval)
+  }, [isOnline, loadUsedTicketsHistory])
+  
+  // Recargar historial cuando se sincronizan pendientes
+  useEffect(() => {
+    if (pendingCount === 0) {
+      // Cuando no hay pendientes, recargar historial para asegurar que está actualizado
+      loadUsedTicketsHistory()
+    }
+  }, [pendingCount, loadUsedTicketsHistory])
+
+  // Prevenir duplicados (< 2 segundos)
+  const isDuplicateScan = useCallback((qrCode: string) => {
+    const now = Date.now()
+    if (now - lastScanTime < 2000 && history[0]?.qrCode === qrCode) {
+      return true
+    }
+    return false
+  }, [lastScanTime, history])
+
+  const processScan = useCallback(async (qrCode: string) => {
+    const now = Date.now()
+    
+    // Prevenir duplicados
+    if (isDuplicateScan(qrCode)) {
+      console.log('Duplicate scan ignored')
+      return
+    }
+
+    setLastScanTime(now)
+
+    try {
+      // Buscar localmente primero
+      let ticket = await findByIdentifier(qrCode)
+
+      // Si no se encuentra localmente y hay conexión, intentar remoto
+      if (!ticket && isOnline) {
+        try {
+          const adminKey = localStorage.getItem('admin_key')
+          const response = await fetch('/api/tickets/scan', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${adminKey}`
+            },
+            body: JSON.stringify({ mode: 'scan', rawValue: qrCode })
+          })
+
+          if (response.ok) {
+            const { ticket: remoteTicket } = await response.json()
+            ticket = remoteTicket
+            // Guardar en IndexedDB para próxima vez
+            if (ticket) {
+              const { db } = await import('@/lib/db')
+              await db.tickets.put(ticket)
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching remote ticket:', error)
+        }
+      }
+
+      let status: 'available' | 'used' | 'not_found' = 'not_found'
+      let processedTicket: Ticket | null = null
+
+      if (ticket) {
+        if (ticket.is_used) {
+          status = 'used'
+          processedTicket = ticket
+        } else {
+          // Marcar como usado localmente (usar 'Operador' como default si no hay nombre)
+          const operatorName = scannedBy.trim() || 'Operador'
+          await markLocallyUsed(ticket.id, operatorName)
+          
+          // Obtener el ticket actualizado después de marcarlo como usado
+          const updatedTicket = await findByIdentifier(ticket.qr_code)
+          processedTicket = updatedTicket || {
+            ...ticket,
+            is_used: true,
+            used_at: new Date().toISOString(),
+            scanned_by: operatorName,
+            updated_at: new Date().toISOString()
+          }
+          
+          status = 'available' // 'available' significa que fue marcado como usado exitosamente
+          playSuccessSound()
+        }
+      }
+
+      const result: ScanResult = {
+        ticket: processedTicket,
+        status,
+        scannedAt: new Date().toISOString()
+      }
+
+      setLastScan(result)
+
+      // Si se marcó como usado, actualizar el historial completo desde IndexedDB
+      if (status === 'available' && processedTicket?.is_used) {
+        await loadUsedTicketsHistory()
+      } else {
+        // Agregar al historial solo si no es un ticket usado (para tickets ya usados que se reescanearon)
+        const historyItem: HistoryItem = {
+          ...result,
+          qrCode
+        }
+        setHistory(prev => [historyItem, ...prev].slice(0, 50))
+      }
+
+      // Intentar sincronizar si se marcó como usado y hay conexión
+      if (status === 'available' && processedTicket?.is_used && isOnline) {
+        syncPendingUses()
+      }
+    } catch (error) {
+      console.error('Error processing scan:', error)
+      setLastScan({
+        ticket: null,
+        status: 'not_found',
+        scannedAt: new Date().toISOString()
+      })
+    }
+  }, [findByIdentifier, markLocallyUsed, isOnline, syncPendingUses, isDuplicateScan])
+
+  const startCamera = useCallback(async () => {
+    if (!qrCodeRegionRef.current) return
+
+    // Si ya hay una instancia activa o se está inicializando, no iniciar de nuevo
+    if (scannerRef.current || isInitializingRef.current) {
+      console.log('Scanner already active or initializing, skipping start')
+      return
+    }
+
+    isInitializingRef.current = true
+    setCameraState('starting')
+
+    try {
+      // Limpiar el contenedor primero
+      const container = document.getElementById('qr-reader')
+      if (container) {
+        container.innerHTML = ''
+      }
+
+      // Pequeña pausa para asegurar que el DOM está listo
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      const html5QrCode = new Html5Qrcode('qr-reader')
+      
+      await html5QrCode.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+          aspectRatio: 1.0
+        },
+        (decodedText) => {
+          processScan(decodedText)
+        },
+        (errorMessage) => {
+          // Ignorar errores de escaneo continuo
+        }
+      )
+
+      scannerRef.current = html5QrCode
+      setCameraState('active')
+      isInitializingRef.current = false
+    } catch (error) {
+      console.error('Error starting camera:', error)
+      setCameraState('idle')
+      scannerRef.current = null
+      isInitializingRef.current = false
+      // Solo mostrar alert si no es un error de cámara ya en uso
+      const errorMsg = (error as Error).message || String(error)
+      if (!errorMsg.includes('already') && !errorMsg.includes('already started')) {
+        alert('Error al acceder a la cámara. Verifica los permisos.')
+      }
+    }
+  }, [processScan])
+
+  const stopCamera = useCallback(async () => {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop()
+        await scannerRef.current.clear()
+      } catch (error) {
+        console.error('Error stopping camera:', error)
+      } finally {
+        // Limpiar el contenedor
+        const container = document.getElementById('qr-reader')
+        if (container) {
+          container.innerHTML = ''
+        }
+        scannerRef.current = null
+        isInitializingRef.current = false
+        setCameraState('idle')
+      }
+    } else {
+      // Si no hay instancia pero está marcado como inicializando, resetear
+      isInitializingRef.current = false
+    }
+  }, [])
+
+  const pauseCamera = useCallback(async () => {
+    if (scannerRef.current && cameraState === 'active') {
+      try {
+        await scannerRef.current.pause()
+        setCameraState('paused')
+      } catch (error) {
+        console.error('Error pausing camera:', error)
+      }
+    }
+  }, [cameraState])
+
+  const resumeCamera = useCallback(async () => {
+    if (scannerRef.current && cameraState === 'paused') {
+      try {
+        await scannerRef.current.resume()
+        setCameraState('active')
+      } catch (error) {
+        console.error('Error resuming camera:', error)
+      }
+    }
+  }, [cameraState])
+
+  const handleManualSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (manualCode.trim()) {
+      processScan(manualCode.trim())
+      setManualCode('')
+      setShowManual(false)
+    }
+  }
+
+  const clearResult = () => {
+    setLastScan(null)
+  }
+
+  // Cargar operadores y seleccionado desde localStorage
+  useEffect(() => {
+    const savedOperators = localStorage.getItem(OPERATORS_STORAGE_KEY)
+    const savedSelected = localStorage.getItem(SELECTED_OPERATOR_KEY)
+    
+    if (savedOperators) {
+      try {
+        const operatorsList = JSON.parse(savedOperators)
+        setOperators(operatorsList)
+        
+        // Si hay un operador guardado, seleccionarlo
+        if (savedSelected && operatorsList.includes(savedSelected)) {
+          setScannedBy(savedSelected)
+        } else if (operatorsList.length > 0) {
+          // Si no hay guardado pero hay operadores, seleccionar el primero
+          setScannedBy(operatorsList[0])
+          localStorage.setItem(SELECTED_OPERATOR_KEY, operatorsList[0])
+        }
+      } catch (error) {
+        console.error('Error loading operators:', error)
+      }
+    }
+  }, [])
+
+  // Guardar operador seleccionado cuando cambia
+  useEffect(() => {
+    if (scannedBy && operators.includes(scannedBy)) {
+      localStorage.setItem(SELECTED_OPERATOR_KEY, scannedBy)
+    }
+  }, [scannedBy, operators])
+
+  // Guardar lista de operadores cuando cambia
+  useEffect(() => {
+    if (operators.length > 0) {
+      localStorage.setItem(OPERATORS_STORAGE_KEY, JSON.stringify(operators))
+    }
+  }, [operators])
+
+  // Cerrar dropdown al hacer click fuera
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOperatorDropdownOpen(false)
+        setShowAddOperator(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [])
+
+  const handleSelectOperator = (operator: string) => {
+    setScannedBy(operator)
+    setIsOperatorDropdownOpen(false)
+    setShowAddOperator(false)
+  }
+
+  const handleAddNewOperator = (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmedName = newOperatorName.trim()
+    
+    if (trimmedName && !operators.includes(trimmedName)) {
+      const updatedOperators = [...operators, trimmedName]
+      setOperators(updatedOperators)
+      setScannedBy(trimmedName)
+      setNewOperatorName('')
+      setShowAddOperator(false)
+      setIsOperatorDropdownOpen(false)
+    } else if (trimmedName && operators.includes(trimmedName)) {
+      // Si ya existe, simplemente seleccionarlo
+      setScannedBy(trimmedName)
+      setNewOperatorName('')
+      setShowAddOperator(false)
+      setIsOperatorDropdownOpen(false)
+    }
+  }
+
+  const handleRemoveOperator = (operator: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const updatedOperators = operators.filter(op => op !== operator)
+    setOperators(updatedOperators)
+    
+    // Si el operador eliminado era el seleccionado, seleccionar otro o limpiar
+    if (scannedBy === operator) {
+      if (updatedOperators.length > 0) {
+        setScannedBy(updatedOperators[0])
+      } else {
+        setScannedBy('')
+      }
+    }
+  }
+
+  useEffect(() => {
+    let mounted = true
+    let timeoutId: NodeJS.Timeout
+
+    // Esperar un momento para evitar inicializaciones dobles en Strict Mode
+    const initCamera = async () => {
+      // Verificar múltiples condiciones antes de iniciar
+      if (!mounted || scannerRef.current || isInitializingRef.current) {
+        return
+      }
+
+      // Verificar si el elemento existe
+      const container = document.getElementById('qr-reader')
+      if (container && mounted && !scannerRef.current && !isInitializingRef.current) {
+        await startCamera()
+      }
+    }
+
+    // Delay más largo para evitar conflictos en React Strict Mode
+    timeoutId = setTimeout(initCamera, 300)
+
+    return () => {
+      mounted = false
+      clearTimeout(timeoutId)
+      // Detener cámara al desmontar
+      if (scannerRef.current || isInitializingRef.current) {
+        stopCamera()
+      }
+    }
+  }, [startCamera, stopCamera])
+
+  return (
+    <div className="min-h-screen bg-gray-900 px-4 py-6">
+      {/* Header */}
+      <div className="max-w-md mx-auto mb-4">
+        <div className="flex items-center justify-between mb-4">
+          <h1 className="text-2xl font-bold text-white">Fiesta China</h1>
+          <div className="flex items-center gap-2">
+            <div className={`w-3 h-3 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
+            <span className="text-sm text-gray-300">{isOnline ? 'Online' : 'Offline'}</span>
+          </div>
+        </div>
+
+        {/* Estado de la cámara */}
+        <div className="bg-gray-800 rounded-lg p-3 mb-3">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-300">
+              Cámara: <span className="font-medium text-white capitalize">{cameraState === 'active' ? 'Activa' : cameraState === 'paused' ? 'Pausada' : cameraState === 'starting' ? 'Iniciando...' : 'Inactiva'}</span>
+            </span>
+            <div className="flex gap-2">
+              {cameraState === 'active' && (
+                <button
+                  onClick={pauseCamera}
+                  className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white rounded text-sm"
+                >
+                  Pausar
+                </button>
+              )}
+              {cameraState === 'paused' && (
+                <button
+                  onClick={resumeCamera}
+                  className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-sm"
+                >
+                  Reanudar
+                </button>
+              )}
+              {cameraState === 'idle' && (
+                <button
+                  onClick={startCamera}
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
+                >
+                  Iniciar
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Selector de operador */}
+        <div className="relative mb-3" ref={dropdownRef}>
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            Operador
+          </label>
+          <button
+            type="button"
+            onClick={() => {
+              setIsOperatorDropdownOpen(!isOperatorDropdownOpen)
+              setShowAddOperator(false)
+            }}
+            className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center justify-between"
+          >
+            <span className={scannedBy ? 'text-white' : 'text-gray-400'}>
+              {scannedBy || 'Seleccionar operador'}
+            </span>
+            <svg
+              className={`w-4 h-4 text-gray-400 transition-transform ${
+                isOperatorDropdownOpen ? 'transform rotate-180' : ''
+              }`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 9l-7 7-7-7"
+              />
+            </svg>
+          </button>
+
+          {/* Dropdown */}
+          {isOperatorDropdownOpen && (
+            <div className="absolute z-50 w-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-lg max-h-60 overflow-auto">
+              {operators.length > 0 ? (
+                <div className="py-1">
+                  {operators.map((operator) => (
+                    <div
+                      key={operator}
+                      onClick={() => handleSelectOperator(operator)}
+                      className={`px-4 py-2 cursor-pointer hover:bg-gray-700 flex items-center justify-between ${
+                        scannedBy === operator ? 'bg-gray-700' : ''
+                      }`}
+                    >
+                      <span className="text-white">{operator}</span>
+                      <div className="flex items-center gap-2">
+                        {scannedBy === operator && (
+                          <svg
+                            className="w-4 h-4 text-blue-500"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M5 13l4 4L19 7"
+                            />
+                          </svg>
+                        )}
+                        {operators.length > 1 && (
+                          <button
+                            onClick={(e) => handleRemoveOperator(operator, e)}
+                            className="text-red-400 hover:text-red-300 p-1"
+                            title="Eliminar operador"
+                          >
+                            <svg
+                              className="w-4 h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M6 18L18 6M6 6l12 12"
+                              />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="px-4 py-2 text-gray-400 text-sm">
+                  No hay operadores guardados
+                </div>
+              )}
+
+              {/* Separador */}
+              <div className="border-t border-gray-700" />
+
+              {/* Botón para agregar nuevo */}
+              {!showAddOperator ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddOperator(true)
+                    setNewOperatorName('')
+                  }}
+                  className="w-full px-4 py-2 text-left text-blue-400 hover:bg-gray-700 flex items-center gap-2"
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 4v16m8-8H4"
+                    />
+                  </svg>
+                  Agregar nuevo operador
+                </button>
+              ) : (
+                <form onSubmit={handleAddNewOperator} className="p-2">
+                  <input
+                    type="text"
+                    value={newOperatorName}
+                    onChange={(e) => setNewOperatorName(e.target.value)}
+                    placeholder="Nombre del operador"
+                    autoFocus
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm mb-2"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      className="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium"
+                    >
+                      Agregar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAddOperator(false)
+                        setNewOperatorName('')
+                      }}
+                      className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Pendientes de sincronizar */}
+        {pendingCount > 0 && (
+          <div className="bg-yellow-900/50 border border-yellow-700 rounded-lg p-3 mb-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-yellow-200">
+                {pendingCount} {pendingCount === 1 ? 'ticket pendiente' : 'tickets pendientes'} por sincronizar
+              </span>
+              {isOnline && (
+                <button
+                  onClick={() => syncPendingUses()}
+                  className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white rounded text-sm"
+                >
+                  Sincronizar
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Escáner QR */}
+      <div className="max-w-md mx-auto mb-4">
+        <div
+          id="qr-reader"
+          ref={qrCodeRegionRef}
+          className="w-full bg-black rounded-lg overflow-hidden"
+        />
+      </div>
+
+      {/* Búsqueda manual */}
+      <div className="max-w-md mx-auto mb-4">
+        {!showManual ? (
+          <button
+            onClick={() => setShowManual(true)}
+            className="w-full py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg font-medium"
+          >
+            Búsqueda Manual
+          </button>
+        ) : (
+          <form onSubmit={handleManualSubmit} className="space-y-2">
+            <input
+              type="text"
+              value={manualCode}
+              onChange={(e) => setManualCode(e.target.value)}
+              placeholder="Ingresa código QR manualmente"
+              className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+              >
+                Buscar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowManual(false)
+                  setManualCode('')
+                }}
+                className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg"
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+
+      {/* Historial - Todas las entradas usadas */}
+      <div className="max-w-md mx-auto mb-4">
+        <h2 className="text-lg font-bold text-white mb-2">
+          Historial de Escaneos {history.length > 0 && `(${history.length})`}
+        </h2>
+        <div className="space-y-2 max-h-96 overflow-y-auto">
+          {history.length > 0 ? (
+            history.map((item, index) => (
+              <div
+                key={`${item.qrCode}-${item.scannedAt}-${index}`}
+                className="bg-gray-800 rounded-lg p-3 text-sm border-l-4 border-green-500"
+              >
+                {item.ticket && (
+                  <>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-white font-semibold">{item.ticket.holder_name}</span>
+                      <span className="px-2 py-1 rounded text-xs bg-green-900 text-green-200">
+                        Usado
+                      </span>
+                    </div>
+                    <div className="space-y-1 text-xs text-gray-300">
+                      {item.ticket.used_at && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-400">Escaneado:</span>
+                          <span className="text-white">
+                            {new Date(item.ticket.used_at).toLocaleString('es-AR', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit'
+                            })}
+                          </span>
+                        </div>
+                      )}
+                      {item.ticket.scanned_by && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-400">Por:</span>
+                          <span className="text-white">{item.ticket.scanned_by}</span>
+                        </div>
+                      )}
+                      {item.ticket.ticket_type && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-400">Tipo:</span>
+                          <span className="text-white">{item.ticket.ticket_type}</span>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            ))
+          ) : (
+            <div className="bg-gray-800 rounded-lg p-4 text-center text-gray-400 text-sm">
+              No hay tickets escaneados todavía
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Resultado del escaneo */}
+      {lastScan && (
+        <div className="max-w-md mx-auto mb-4">
+          <div
+            className={`rounded-lg p-6 ${
+              lastScan.status === 'available'
+                ? 'bg-green-900/50 border-2 border-green-600'
+                : lastScan.status === 'used'
+                ? 'bg-yellow-900/50 border-2 border-yellow-600'
+                : 'bg-red-900/50 border-2 border-red-600'
+            }`}
+          >
+            {lastScan.ticket ? (
+              <>
+                <h3 className="text-xl font-bold text-white mb-3">
+                  {lastScan.status === 'available' ? 'Marcado como usado' : lastScan.status === 'used' ? 'Ya usado' : 'No existe'}
+                </h3>
+                <div className="space-y-2 text-sm">
+                  <div>
+                    <span className="text-gray-400">Nombre: </span>
+                    <span className="text-white font-medium">{lastScan.ticket.holder_name}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Email: </span>
+                    <span className="text-white font-medium">{lastScan.ticket.holder_email}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Tipo: </span>
+                    <span className="text-white font-medium">{lastScan.ticket.ticket_type}</span>
+                  </div>
+                  {(lastScan.status === 'used' || lastScan.status === 'available') && lastScan.ticket.used_at && (
+                    <div>
+                      <span className="text-gray-400">Usado el: </span>
+                      <span className="text-white font-medium">
+                        {new Date(lastScan.ticket.used_at).toLocaleString('es-AR')}
+                      </span>
+                    </div>
+                  )}
+                  {(lastScan.status === 'used' || lastScan.status === 'available') && lastScan.ticket.scanned_by && (
+                    <div>
+                      <span className="text-gray-400">Escaneado por: </span>
+                      <span className="text-white font-medium">{lastScan.ticket.scanned_by}</span>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="text-center">
+                <h3 className="text-xl font-bold text-white mb-2">Ticket no encontrado</h3>
+                <p className="text-gray-300">El código QR escaneado no corresponde a ningún ticket válido.</p>
+              </div>
+            )}
+            <button
+              onClick={clearResult}
+              className="mt-4 w-full py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg"
+            >
+              Limpiar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
