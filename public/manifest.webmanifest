@@ -1,12 +1,16 @@
 {
   "name": "PWA Scanner - Control de Entradas",
   "short_name": "PWA Scanner",
-  "description": "Aplicación PWA para control de entradas en eventos",
+  "description": "Aplicación PWA para control de entradas en eventos - Funciona offline",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0a0a0a",
   "theme_color": "#0a0a0a",
   "orientation": "portrait",
+  "dir": "ltr",
+  "lang": "es",
+  "categories": ["productivity", "utilities"],
   "icons": [
     {
       "src": "/icons/icon-192x192.png",
@@ -20,6 +24,9 @@
       "type": "image/png",
       "purpose": "any maskable"
     }
-  ]
+  ],
+  "screenshots": [],
+  "related_applications": [],
+  "prefer_related_applications": false
 }
 
