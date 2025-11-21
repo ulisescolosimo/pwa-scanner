@@ -5,7 +5,7 @@ import { Html5Qrcode } from 'html5-qrcode'
 import { useTicketStore } from '@/lib/ticketStore'
 import { playSuccessSound } from '@/utils/sound'
 import type { Ticket } from '@/types/ticket'
-import toast from 'react-hot-toast'
+import { toast } from 'sonner'
 
 interface ScanResult {
   ticket: Ticket | null
@@ -128,13 +128,8 @@ export default function Scanner() {
     
     // Prevenir duplicados
     if (isDuplicateScan(qrCode)) {
-      toast('Escaneo duplicado ignorado', {
+      toast.info('Escaneo duplicado ignorado', {
         duration: 2000,
-        icon: '⏭️',
-        style: {
-          background: '#374151',
-          color: '#fff',
-        },
       })
       return
     }
@@ -190,12 +185,10 @@ export default function Scanner() {
                 minute: '2-digit'
               })
             : 'Fecha desconocida'
-          toast.error(
-            `⚠️ Ticket ya usado\n${ticket.holder_name}\nUsado el: ${usedDate}`,
-            {
-              duration: 4000,
-            }
-          )
+          toast.warning(`Ticket ya usado`, {
+            description: `${ticket.holder_name} - Usado el: ${usedDate}`,
+            duration: 4000,
+          })
         } else {
           // Marcar como usado localmente (usar 'Operador' como default si no hay nombre)
           const operatorName = scannedBy.trim() || 'Operador'
@@ -215,21 +208,17 @@ export default function Scanner() {
           playSuccessSound()
           
           // Toast de éxito
-          toast.success(
-            `✅ Ticket válido\n${ticket.holder_name}\nTipo: ${ticket.ticket_type || 'N/A'}`,
-            {
-              duration: 3000,
-            }
-          )
+          toast.success('Ticket válido', {
+            description: `${ticket.holder_name} - Tipo: ${ticket.ticket_type || 'N/A'}`,
+            duration: 3000,
+          })
         }
       } else {
         // Toast para ticket no encontrado
-        toast.error(
-          '❌ Ticket no encontrado\nEl código QR no corresponde a ningún ticket válido',
-          {
-            duration: 4000,
-          }
-        )
+        toast.error('Ticket no encontrado', {
+          description: 'El código QR no corresponde a ningún ticket válido',
+          duration: 4000,
+        })
       }
 
       const result: ScanResult = {
@@ -256,21 +245,24 @@ export default function Scanner() {
       }
     } catch (error) {
       console.error('Error processing scan:', error)
-      toast.error(
-        '❌ Error al procesar el escaneo\nIntenta nuevamente',
-        {
-          duration: 4000,
-        }
-      )
+      toast.error('Error al procesar el escaneo', {
+        description: 'Intenta nuevamente',
+        duration: 4000,
+      })
     }
   }, [findByIdentifier, markLocallyUsed, isOnline, syncPendingUses, isDuplicateScan])
 
   const startCamera = useCallback(async () => {
-    if (!qrCodeRegionRef.current) return
-
     // Si ya hay una instancia activa o se está inicializando, no iniciar de nuevo
     if (scannerRef.current || isInitializingRef.current) {
       console.log('Scanner already active or initializing, skipping start')
+      return
+    }
+
+    // Verificar que el contenedor existe
+    const container = qrCodeRegionRef.current
+    if (!container) {
+      console.log('Container not ready, skipping start')
       return
     }
 
@@ -278,23 +270,39 @@ export default function Scanner() {
     setCameraState('starting')
 
     try {
-      // Limpiar el contenedor primero
-      const container = document.getElementById('qr-reader')
-      if (container) {
-        container.innerHTML = ''
+      // Limpiar el contenedor completamente antes de iniciar
+      // Eliminar todos los elementos hijos, incluyendo videos
+      while (container.firstChild) {
+        container.removeChild(container.firstChild)
       }
+      container.innerHTML = ''
 
       // Pequeña pausa para asegurar que el DOM está listo
-      await new Promise(resolve => setTimeout(resolve, 100))
+      await new Promise(resolve => setTimeout(resolve, 200))
 
-      const html5QrCode = new Html5Qrcode('qr-reader')
+      // Verificar nuevamente que no se haya iniciado otra instancia
+      if (scannerRef.current || isInitializingRef.current === false) {
+        console.log('Another instance started, aborting')
+        return
+      }
+
+      // Verificar que el contenedor sigue existiendo y está vacío
+      if (!qrCodeRegionRef.current || qrCodeRegionRef.current.children.length > 0) {
+        console.log('Container not ready or has children, aborting')
+        return
+      }
+
+      // Crear nueva instancia usando el ID del contenedor
+      const containerId = 'qr-reader'
+      const html5QrCode = new Html5Qrcode(containerId)
       
       await html5QrCode.start(
         { facingMode: 'environment' },
         {
           fps: 10,
           qrbox: { width: 250, height: 250 },
-          aspectRatio: 1.0
+          aspectRatio: 1.0,
+          disableFlip: true, // Evitar que se voltee
         },
         (decodedText) => {
           processScan(decodedText)
@@ -312,10 +320,16 @@ export default function Scanner() {
       setCameraState('idle')
       scannerRef.current = null
       isInitializingRef.current = false
+      // Limpiar contenedor en caso de error
+      if (qrCodeRegionRef.current) {
+        qrCodeRegionRef.current.innerHTML = ''
+      }
       // Solo mostrar alert si no es un error de cámara ya en uso
       const errorMsg = (error as Error).message || String(error)
-      if (!errorMsg.includes('already') && !errorMsg.includes('already started')) {
-        alert('Error al acceder a la cámara. Verifica los permisos.')
+      if (!errorMsg.includes('already') && !errorMsg.includes('already started') && !errorMsg.includes('NotFoundError')) {
+        toast.error('Error al acceder a la cámara', {
+          description: 'Verifica los permisos de la cámara',
+        })
       }
     }
   }, [processScan])
@@ -328,10 +342,9 @@ export default function Scanner() {
       } catch (error) {
         console.error('Error stopping camera:', error)
       } finally {
-        // Limpiar el contenedor
-        const container = document.getElementById('qr-reader')
-        if (container) {
-          container.innerHTML = ''
+        // Limpiar el contenedor usando el ref
+        if (qrCodeRegionRef.current) {
+          qrCodeRegionRef.current.innerHTML = ''
         }
         scannerRef.current = null
         isInitializingRef.current = false
@@ -340,6 +353,10 @@ export default function Scanner() {
     } else {
       // Si no hay instancia pero está marcado como inicializando, resetear
       isInitializingRef.current = false
+      // Asegurar que el contenedor esté limpio
+      if (qrCodeRegionRef.current) {
+        qrCodeRegionRef.current.innerHTML = ''
+      }
     }
   }, [])
 
@@ -469,26 +486,25 @@ export default function Scanner() {
     }
   }
 
+  // Inicializar cámara solo una vez al montar el componente
   useEffect(() => {
     let mounted = true
     let timeoutId: NodeJS.Timeout
 
-    // Esperar un momento para evitar inicializaciones dobles en Strict Mode
     const initCamera = async () => {
       // Verificar múltiples condiciones antes de iniciar
       if (!mounted || scannerRef.current || isInitializingRef.current) {
         return
       }
 
-      // Verificar si el elemento existe
-      const container = document.getElementById('qr-reader')
-      if (container && mounted && !scannerRef.current && !isInitializingRef.current) {
+      // Verificar que el contenedor existe usando el ref
+      if (qrCodeRegionRef.current && mounted && !scannerRef.current && !isInitializingRef.current) {
         await startCamera()
       }
     }
 
-    // Delay más largo para evitar conflictos en React Strict Mode
-    timeoutId = setTimeout(initCamera, 300)
+    // Delay para asegurar que el DOM está listo
+    timeoutId = setTimeout(initCamera, 500)
 
     return () => {
       mounted = false
@@ -498,7 +514,8 @@ export default function Scanner() {
         stopCamera()
       }
     }
-  }, [startCamera, stopCamera])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Solo ejecutar una vez al montar
 
   return (
     <div className="min-h-screen bg-gray-900 px-4 py-6">
