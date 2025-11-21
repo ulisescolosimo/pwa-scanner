@@ -281,14 +281,17 @@ export default function Scanner() {
       await new Promise(resolve => setTimeout(resolve, 200))
 
       // Verificar nuevamente que no se haya iniciado otra instancia
-      if (scannerRef.current || isInitializingRef.current === false) {
-        console.log('Another instance started, aborting')
+      // Si scannerRef.current existe, significa que otra instancia ya se inició
+      if (scannerRef.current) {
+        console.log('Another instance already started, aborting')
+        isInitializingRef.current = false
         return
       }
 
       // Verificar que el contenedor sigue existiendo y está vacío
       if (!qrCodeRegionRef.current || qrCodeRegionRef.current.children.length > 0) {
         console.log('Container not ready or has children, aborting')
+        isInitializingRef.current = false
         return
       }
 
