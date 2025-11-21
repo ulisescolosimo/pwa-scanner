@@ -5,6 +5,7 @@ import { Html5Qrcode } from 'html5-qrcode'
 import { useTicketStore } from '@/lib/ticketStore'
 import { playSuccessSound } from '@/utils/sound'
 import type { Ticket } from '@/types/ticket'
+import toast from 'react-hot-toast'
 
 interface ScanResult {
   ticket: Ticket | null
@@ -30,7 +31,6 @@ export default function Scanner() {
   const [newOperatorName, setNewOperatorName] = useState('')
   const [isOperatorDropdownOpen, setIsOperatorDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
-  const [lastScan, setLastScan] = useState<ScanResult | null>(null)
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [manualCode, setManualCode] = useState('')
   const [showManual, setShowManual] = useState(false)
@@ -128,7 +128,14 @@ export default function Scanner() {
     
     // Prevenir duplicados
     if (isDuplicateScan(qrCode)) {
-      console.log('Duplicate scan ignored')
+      toast('Escaneo duplicado ignorado', {
+        duration: 2000,
+        icon: '⏭️',
+        style: {
+          background: '#374151',
+          color: '#fff',
+        },
+      })
       return
     }
 
@@ -162,6 +169,7 @@ export default function Scanner() {
           }
         } catch (error) {
           console.error('Error fetching remote ticket:', error)
+          // No mostrar toast aquí, se mostrará el de "no encontrado" más abajo
         }
       }
 
@@ -172,6 +180,22 @@ export default function Scanner() {
         if (ticket.is_used) {
           status = 'used'
           processedTicket = ticket
+          
+          // Toast para ticket ya usado
+          const usedDate = ticket.used_at 
+            ? new Date(ticket.used_at).toLocaleString('es-AR', {
+                day: '2-digit',
+                month: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+              })
+            : 'Fecha desconocida'
+          toast.error(
+            `⚠️ Ticket ya usado\n${ticket.holder_name}\nUsado el: ${usedDate}`,
+            {
+              duration: 4000,
+            }
+          )
         } else {
           // Marcar como usado localmente (usar 'Operador' como default si no hay nombre)
           const operatorName = scannedBy.trim() || 'Operador'
@@ -189,7 +213,23 @@ export default function Scanner() {
           
           status = 'available' // 'available' significa que fue marcado como usado exitosamente
           playSuccessSound()
+          
+          // Toast de éxito
+          toast.success(
+            `✅ Ticket válido\n${ticket.holder_name}\nTipo: ${ticket.ticket_type || 'N/A'}`,
+            {
+              duration: 3000,
+            }
+          )
         }
+      } else {
+        // Toast para ticket no encontrado
+        toast.error(
+          '❌ Ticket no encontrado\nEl código QR no corresponde a ningún ticket válido',
+          {
+            duration: 4000,
+          }
+        )
       }
 
       const result: ScanResult = {
@@ -197,8 +237,6 @@ export default function Scanner() {
         status,
         scannedAt: new Date().toISOString()
       }
-
-      setLastScan(result)
 
       // Si se marcó como usado, actualizar el historial completo desde IndexedDB
       if (status === 'available' && processedTicket?.is_used) {
@@ -218,11 +256,12 @@ export default function Scanner() {
       }
     } catch (error) {
       console.error('Error processing scan:', error)
-      setLastScan({
-        ticket: null,
-        status: 'not_found',
-        scannedAt: new Date().toISOString()
-      })
+      toast.error(
+        '❌ Error al procesar el escaneo\nIntenta nuevamente',
+        {
+          duration: 4000,
+        }
+      )
     }
   }, [findByIdentifier, markLocallyUsed, isOnline, syncPendingUses, isDuplicateScan])
 
@@ -335,9 +374,6 @@ export default function Scanner() {
     }
   }
 
-  const clearResult = () => {
-    setLastScan(null)
-  }
 
   // Cargar operadores y seleccionado desde localStorage
   useEffect(() => {
@@ -798,67 +834,6 @@ export default function Scanner() {
         </div>
       </div>
 
-      {/* Resultado del escaneo */}
-      {lastScan && (
-        <div className="max-w-md mx-auto mb-4">
-          <div
-            className={`rounded-lg p-6 ${
-              lastScan.status === 'available'
-                ? 'bg-green-900/50 border-2 border-green-600'
-                : lastScan.status === 'used'
-                ? 'bg-yellow-900/50 border-2 border-yellow-600'
-                : 'bg-red-900/50 border-2 border-red-600'
-            }`}
-          >
-            {lastScan.ticket ? (
-              <>
-                <h3 className="text-xl font-bold text-white mb-3">
-                  {lastScan.status === 'available' ? 'Marcado como usado' : lastScan.status === 'used' ? 'Ya usado' : 'No existe'}
-                </h3>
-                <div className="space-y-2 text-sm">
-                  <div>
-                    <span className="text-gray-400">Nombre: </span>
-                    <span className="text-white font-medium">{lastScan.ticket.holder_name}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-400">Email: </span>
-                    <span className="text-white font-medium">{lastScan.ticket.holder_email}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-400">Tipo: </span>
-                    <span className="text-white font-medium">{lastScan.ticket.ticket_type}</span>
-                  </div>
-                  {(lastScan.status === 'used' || lastScan.status === 'available') && lastScan.ticket.used_at && (
-                    <div>
-                      <span className="text-gray-400">Usado el: </span>
-                      <span className="text-white font-medium">
-                        {new Date(lastScan.ticket.used_at).toLocaleString('es-AR')}
-                      </span>
-                    </div>
-                  )}
-                  {(lastScan.status === 'used' || lastScan.status === 'available') && lastScan.ticket.scanned_by && (
-                    <div>
-                      <span className="text-gray-400">Escaneado por: </span>
-                      <span className="text-white font-medium">{lastScan.ticket.scanned_by}</span>
-                    </div>
-                  )}
-                </div>
-              </>
-            ) : (
-              <div className="text-center">
-                <h3 className="text-xl font-bold text-white mb-2">Ticket no encontrado</h3>
-                <p className="text-gray-300">El código QR escaneado no corresponde a ningún ticket válido.</p>
-              </div>
-            )}
-            <button
-              onClick={clearResult}
-              className="mt-4 w-full py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg"
-            >
-              Limpiar
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
