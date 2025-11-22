@@ -853,6 +853,7 @@ export default function Scanner() {
               </div>
             )}
           </div>
+        </div>
         )}
 
       {/* Escáner QR - Área más grande */}
