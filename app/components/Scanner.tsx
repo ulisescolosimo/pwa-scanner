@@ -324,28 +324,69 @@ export default function Scanner() {
       isInitializingRef.current = false
 
       // Obtener el track de video para controlar el flash
-      try {
-        // Esperar un momento para que el video se renderice
-        await new Promise(resolve => setTimeout(resolve, 300))
-        const videoElement = container.querySelector('video')
-        if (videoElement && videoElement.srcObject) {
-          const stream = videoElement.srcObject as MediaStream
-          const videoTrack = stream.getVideoTracks()[0]
-          if (videoTrack) {
-            videoTrackRef.current = videoTrack
-            // Verificar si el flash está soportado
-            const capabilities = videoTrack.getCapabilities?.() as any
-            if (capabilities?.torch !== undefined) {
-              setFlashSupported(true)
-            } else {
-              setFlashSupported(false)
+      // Intentar múltiples veces ya que el video puede tardar en renderizarse
+      let attempts = 0
+      const maxAttempts = 10
+      const checkForVideoTrack = async (): Promise<void> => {
+        try {
+          const videoElement = container.querySelector('video')
+          if (videoElement && videoElement.srcObject) {
+            const stream = videoElement.srcObject as MediaStream
+            const videoTrack = stream.getVideoTracks()[0]
+            if (videoTrack && videoTrack.readyState === 'live') {
+              videoTrackRef.current = videoTrack
+              
+              // Verificar si el flash está soportado
+              // Algunos navegadores no exponen torch en getCapabilities pero lo soportan
+              const capabilities = videoTrack.getCapabilities?.() as any
+              const settings = videoTrack.getSettings?.() as any
+              
+              // Verificar de múltiples formas
+              const hasTorchCapability = capabilities?.torch !== undefined
+              const hasTorchSetting = settings?.torch !== undefined
+              
+              // Intentar aplicar torch para verificar soporte (sin cambiar el estado)
+              if (hasTorchCapability || hasTorchSetting) {
+                setFlashSupported(true)
+                console.log('Flash soportado detectado')
+              } else {
+                // Algunos navegadores soportan torch pero no lo exponen en capabilities
+                // Intentar una prueba silenciosa
+                try {
+                  await videoTrack.applyConstraints({ 
+                    advanced: [{ torch: false }] 
+                  } as any)
+                  setFlashSupported(true)
+                  console.log('Flash soportado (verificado por prueba)')
+                } catch (testError) {
+                  // Si falla, probablemente no está soportado
+                  setFlashSupported(false)
+                  console.log('Flash no soportado:', testError)
+                }
+              }
+              return
             }
           }
+          
+          // Si no se encontró, intentar de nuevo
+          attempts++
+          if (attempts < maxAttempts) {
+            await new Promise(resolve => setTimeout(resolve, 200))
+            return checkForVideoTrack()
+          } else {
+            setFlashSupported(false)
+            console.log('No se pudo obtener el video track después de múltiples intentos')
+          }
+        } catch (error) {
+          console.error('Error obteniendo video track:', error)
+          setFlashSupported(false)
         }
-      } catch (error) {
-        console.log('Flash not supported:', error)
-        setFlashSupported(false)
       }
+      
+      // Iniciar la verificación después de un pequeño delay
+      setTimeout(() => {
+        checkForVideoTrack()
+      }, 500)
     } catch (error) {
       console.error('Error starting camera:', error)
       setCameraState('idle')
@@ -424,14 +465,35 @@ export default function Scanner() {
         await scannerRef.current.resume()
         setCameraState('active')
         
-        // Restaurar el estado del flash si estaba encendido
-        if (flashEnabled && videoTrackRef.current) {
-          try {
-            await videoTrackRef.current.applyConstraints({ torch: true } as any)
-          } catch (error) {
-            console.log('Error restoring flash:', error)
+        // Re-obtener el video track después de reanudar
+        setTimeout(async () => {
+          const container = qrCodeRegionRef.current
+          if (container) {
+            const videoElement = container.querySelector('video')
+            if (videoElement && videoElement.srcObject) {
+              const stream = videoElement.srcObject as MediaStream
+              const videoTrack = stream.getVideoTracks()[0]
+              if (videoTrack) {
+                videoTrackRef.current = videoTrack
+                
+                // Verificar soporte de flash nuevamente
+                const capabilities = videoTrack.getCapabilities?.() as any
+                if (capabilities?.torch !== undefined) {
+                  setFlashSupported(true)
+                }
+                
+                // Restaurar el estado del flash si estaba encendido
+                if (flashEnabled) {
+                  try {
+                    await videoTrack.applyConstraints({ torch: true } as any)
+                  } catch (error) {
+                    console.log('Error restoring flash:', error)
+                  }
+                }
+              }
+            }
           }
-        }
+        }, 300)
       } catch (error) {
         console.error('Error resuming camera:', error)
       }
@@ -439,26 +501,94 @@ export default function Scanner() {
   }, [cameraState, flashEnabled])
 
   const toggleFlash = useCallback(async () => {
-    if (!videoTrackRef.current || !flashSupported) {
+    if (!videoTrackRef.current) {
+      // Intentar obtener el track nuevamente
+      const container = qrCodeRegionRef.current
+      if (container) {
+        const videoElement = container.querySelector('video')
+        if (videoElement && videoElement.srcObject) {
+          const stream = videoElement.srcObject as MediaStream
+          const videoTrack = stream.getVideoTracks()[0]
+          if (videoTrack) {
+            videoTrackRef.current = videoTrack
+          }
+        }
+      }
+      
+      if (!videoTrackRef.current) {
+        toast.error('Flash no disponible', {
+          description: 'No se pudo acceder al video track',
+        })
+        return
+      }
+    }
+
+    const track = videoTrackRef.current
+    
+    // Verificar que el track esté activo
+    if (track.readyState !== 'live') {
       toast.error('Flash no disponible', {
-        description: 'Tu dispositivo puede no soportar esta función',
+        description: 'La cámara no está activa',
       })
       return
     }
 
     try {
       const newFlashState = !flashEnabled
-      await videoTrackRef.current.applyConstraints({ torch: newFlashState } as any)
-      setFlashEnabled(newFlashState)
       
-      // No mostrar toast para flash, solo feedback visual
-    } catch (error) {
+      // Intentar diferentes formatos según el navegador
+      try {
+        // Método 1: Formato estándar
+        await track.applyConstraints({ torch: newFlashState } as any)
+      } catch (error1) {
+        try {
+          // Método 2: Con advanced
+          await track.applyConstraints({ 
+            advanced: [{ torch: newFlashState }] 
+          } as any)
+        } catch (error2) {
+          // Método 3: Intentar con getSettings primero
+          const settings = track.getSettings() as any
+          if (settings.torch !== undefined) {
+            await track.applyConstraints({ torch: newFlashState } as any)
+          } else {
+            throw error2
+          }
+        }
+      }
+      
+      setFlashEnabled(newFlashState)
+      console.log(`Flash ${newFlashState ? 'encendido' : 'apagado'}`)
+      
+      // Verificar que realmente se aplicó
+      setTimeout(async () => {
+        try {
+          const currentSettings = track.getSettings() as any
+          if (currentSettings.torch !== newFlashState) {
+            console.warn('El estado del flash no coincide con el esperado')
+          }
+        } catch (e) {
+          // Ignorar errores de verificación
+        }
+      }, 100)
+      
+    } catch (error: any) {
       console.error('Error toggling flash:', error)
-      toast.error('No se pudo controlar el flash', {
-        description: 'Tu dispositivo puede no soportar esta función',
-      })
+      const errorMessage = error.message || 'Error desconocido'
+      
+      // Si el error indica que no está soportado, actualizar el estado
+      if (errorMessage.includes('not supported') || errorMessage.includes('not readable')) {
+        setFlashSupported(false)
+        toast.error('Flash no soportado', {
+          description: 'Tu dispositivo o navegador no soporta esta función',
+        })
+      } else {
+        toast.error('No se pudo controlar el flash', {
+          description: errorMessage,
+        })
+      }
     }
-  }, [flashEnabled, flashSupported])
+  }, [flashEnabled])
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault()
