@@ -3,8 +3,8 @@
 @tailwind utilities;
 
 :root {
-  --background: #0a0a0a;
-  --foreground: #ededed;
+  --background: #ffffff;
+  --foreground: #000000;
 }
 
 body {
@@ -23,5 +23,56 @@ html,
 body {
   max-width: 100vw;
   overflow-x: hidden;
+}
+
+/* Estilos para el scanner QR - diseño minimalista */
+#qr-reader {
+  position: relative;
+}
+
+#qr-reader video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover;
+}
+
+/* Ocultar controles nativos del video */
+#qr-reader video::-webkit-media-controls {
+  display: none !important;
+}
+
+#qr-reader video::-webkit-media-controls-enclosure {
+  display: none !important;
+}
+
+/* Estilo para el canvas de detección QR */
+#qr-reader__dashboard {
+  display: none !important;
+}
+
+/* Mejorar el aspecto del área de escaneo */
+#qr-reader__scan_region {
+  border: none !important;
+}
+
+#qr-reader__scan_region_scan_bar {
+  border: 2px solid rgba(255, 255, 255, 0.8) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 0 20px rgba(255, 255, 255, 0.3) !important;
+}
+
+/* Ocultar botón de flash nativo de html5-qrcode */
+#qr-reader__camera_selection,
+#qr-reader__camera_selection_button,
+#qr-reader__flash_toggle,
+button[id*="flash"],
+button[id*="torch"],
+button[title*="flash" i],
+button[title*="torch" i],
+button[aria-label*="flash" i] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 

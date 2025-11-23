@@ -24,10 +24,10 @@ export default function Scanner() {
   const scannerRef = useRef<Html5Qrcode | null>(null)
   const qrCodeRegionRef = useRef<HTMLDivElement>(null)
   const isInitializingRef = useRef(false)
-  const videoTrackRef = useRef<MediaStreamTrack | null>(null)
+  const lastScannedCodeRef = useRef<string>('')
+  const lastScanTimeRef = useRef<number>(0)
+  const isProcessingRef = useRef<boolean>(false)
   const [cameraState, setCameraState] = useState<'idle' | 'starting' | 'active' | 'paused'>('idle')
-  const [flashEnabled, setFlashEnabled] = useState(false)
-  const [flashSupported, setFlashSupported] = useState(false)
   const [scannedBy, setScannedBy] = useState('')
   const [operators, setOperators] = useState<string[]>([])
   const [showAddOperator, setShowAddOperator] = useState(false)
@@ -38,8 +38,7 @@ export default function Scanner() {
   const [manualCode, setManualCode] = useState('')
   const [showManual, setShowManual] = useState(false)
   const [lastScanTime, setLastScanTime] = useState(0)
-  const [compactMode, setCompactMode] = useState(true) // Modo compacto para escaneo rápido
-  const [showHistory, setShowHistory] = useState(false) // Historial colapsable
+  const [historySearchTerm, setHistorySearchTerm] = useState('') // Búsqueda en historial
   
   const { findByIdentifier, markLocallyUsed, isOnline, pendingCount, syncPendingUses } = useTicketStore()
   
@@ -119,26 +118,24 @@ export default function Scanner() {
     }
   }, [pendingCount, loadUsedTicketsHistory])
 
-  // Prevenir duplicados (< 2 segundos)
-  const isDuplicateScan = useCallback((qrCode: string) => {
-    const now = Date.now()
-    if (now - lastScanTime < 2000 && history[0]?.qrCode === qrCode) {
-      return true
-    }
-    return false
-  }, [lastScanTime, history])
-
   const processScan = useCallback(async (qrCode: string) => {
     const now = Date.now()
     
-    // Prevenir duplicados
-    if (isDuplicateScan(qrCode)) {
-      toast.info('Escaneo duplicado ignorado', {
-        duration: 2000,
-      })
+    // Prevenir duplicados usando refs para acceso inmediato
+    // Si es el mismo código y fue escaneado hace menos de 2 segundos, ignorar
+    if (qrCode === lastScannedCodeRef.current && now - lastScanTimeRef.current < 2000) {
+      return // Silenciosamente ignorar, sin mostrar toast
+    }
+    
+    // Si ya se está procesando un escaneo, ignorar nuevos
+    if (isProcessingRef.current) {
       return
     }
 
+    // Marcar como procesando y actualizar refs
+    isProcessingRef.current = true
+    lastScannedCodeRef.current = qrCode
+    lastScanTimeRef.current = now
     setLastScanTime(now)
 
     try {
@@ -253,8 +250,13 @@ export default function Scanner() {
         description: 'Intenta nuevamente',
         duration: 4000,
       })
+    } finally {
+      // Liberar el lock después de un pequeño delay para evitar escaneos muy rápidos
+      setTimeout(() => {
+        isProcessingRef.current = false
+      }, 500)
     }
-  }, [findByIdentifier, markLocallyUsed, isOnline, syncPendingUses, isDuplicateScan])
+  }, [findByIdentifier, markLocallyUsed, isOnline, syncPendingUses, loadUsedTicketsHistory])
 
   const startCamera = useCallback(async () => {
     // Si ya hay una instancia activa o se está inicializando, no iniciar de nuevo
@@ -303,15 +305,46 @@ export default function Scanner() {
       const containerId = 'qr-reader'
       const html5QrCode = new Html5Qrcode(containerId)
       
+      // Calcular tamaño óptimo del qrbox basado en el viewport
+      const viewportWidth = window.innerWidth
+      const viewportHeight = window.innerHeight
+      const qrboxSize = Math.min(
+        Math.min(viewportWidth, viewportHeight) * 0.75,
+        400
+      )
+
+      // Variables locales para prevenir múltiples llamadas del mismo código en el callback
+      let lastProcessedCode = ''
+      let lastProcessedTime = 0
+
       await html5QrCode.start(
-        { facingMode: 'environment' },
+        { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
         {
-          fps: 10,
-          qrbox: { width: Math.min(300, window.innerWidth * 0.8), height: Math.min(300, window.innerWidth * 0.8) },
+          fps: 30, // Mayor FPS para mejor detección
+          qrbox: { 
+            width: qrboxSize, 
+            height: qrboxSize 
+          },
           aspectRatio: 1.0,
-          disableFlip: true, // Evitar que se voltee
+          disableFlip: false, // Permitir flip para mejor detección
+          videoConstraints: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
         },
         (decodedText) => {
+          // Prevenir múltiples llamadas del mismo código en el callback
+          const now = Date.now()
+          if (decodedText === lastProcessedCode && now - lastProcessedTime < 1000) {
+            return // Ignorar si es el mismo código en menos de 1 segundo
+          }
+          lastProcessedCode = decodedText
+          lastProcessedTime = now
           processScan(decodedText)
         },
         (errorMessage) => {
@@ -322,71 +355,6 @@ export default function Scanner() {
       scannerRef.current = html5QrCode
       setCameraState('active')
       isInitializingRef.current = false
-
-      // Obtener el track de video para controlar el flash
-      // Intentar múltiples veces ya que el video puede tardar en renderizarse
-      let attempts = 0
-      const maxAttempts = 10
-      const checkForVideoTrack = async (): Promise<void> => {
-        try {
-          const videoElement = container.querySelector('video')
-          if (videoElement && videoElement.srcObject) {
-            const stream = videoElement.srcObject as MediaStream
-            const videoTrack = stream.getVideoTracks()[0]
-            if (videoTrack && videoTrack.readyState === 'live') {
-              videoTrackRef.current = videoTrack
-              
-              // Verificar si el flash está soportado
-              // Algunos navegadores no exponen torch en getCapabilities pero lo soportan
-              const capabilities = videoTrack.getCapabilities?.() as any
-              const settings = videoTrack.getSettings?.() as any
-              
-              // Verificar de múltiples formas
-              const hasTorchCapability = capabilities?.torch !== undefined
-              const hasTorchSetting = settings?.torch !== undefined
-              
-              // Intentar aplicar torch para verificar soporte (sin cambiar el estado)
-              if (hasTorchCapability || hasTorchSetting) {
-                setFlashSupported(true)
-                console.log('Flash soportado detectado')
-              } else {
-                // Algunos navegadores soportan torch pero no lo exponen en capabilities
-                // Intentar una prueba silenciosa
-                try {
-                  await videoTrack.applyConstraints({ 
-                    advanced: [{ torch: false }] 
-                  } as any)
-                  setFlashSupported(true)
-                  console.log('Flash soportado (verificado por prueba)')
-                } catch (testError) {
-                  // Si falla, probablemente no está soportado
-                  setFlashSupported(false)
-                  console.log('Flash no soportado:', testError)
-                }
-              }
-              return
-            }
-          }
-          
-          // Si no se encontró, intentar de nuevo
-          attempts++
-          if (attempts < maxAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 200))
-            return checkForVideoTrack()
-          } else {
-            setFlashSupported(false)
-            console.log('No se pudo obtener el video track después de múltiples intentos')
-          }
-        } catch (error) {
-          console.error('Error obteniendo video track:', error)
-          setFlashSupported(false)
-        }
-      }
-      
-      // Iniciar la verificación después de un pequeño delay
-      setTimeout(() => {
-        checkForVideoTrack()
-      }, 500)
     } catch (error) {
       console.error('Error starting camera:', error)
       setCameraState('idle')
@@ -407,16 +375,6 @@ export default function Scanner() {
   }, [processScan])
 
   const stopCamera = useCallback(async () => {
-    // Apagar el flash antes de detener la cámara
-    if (flashEnabled && videoTrackRef.current) {
-      try {
-        await videoTrackRef.current.applyConstraints({ torch: false } as any)
-        setFlashEnabled(false)
-      } catch (error) {
-        console.log('Error turning off flash:', error)
-      }
-    }
-
     if (scannerRef.current) {
       try {
         await scannerRef.current.stop()
@@ -429,24 +387,18 @@ export default function Scanner() {
           qrCodeRegionRef.current.innerHTML = ''
         }
         scannerRef.current = null
-        videoTrackRef.current = null
         isInitializingRef.current = false
         setCameraState('idle')
-        setFlashEnabled(false)
-        setFlashSupported(false)
       }
     } else {
       // Si no hay instancia pero está marcado como inicializando, resetear
       isInitializingRef.current = false
-      videoTrackRef.current = null
-      setFlashEnabled(false)
-      setFlashSupported(false)
       // Asegurar que el contenedor esté limpio
       if (qrCodeRegionRef.current) {
         qrCodeRegionRef.current.innerHTML = ''
       }
     }
-  }, [flashEnabled])
+  }, [])
 
   const pauseCamera = useCallback(async () => {
     if (scannerRef.current && cameraState === 'active') {
@@ -464,131 +416,12 @@ export default function Scanner() {
       try {
         await scannerRef.current.resume()
         setCameraState('active')
-        
-        // Re-obtener el video track después de reanudar
-        setTimeout(async () => {
-          const container = qrCodeRegionRef.current
-          if (container) {
-            const videoElement = container.querySelector('video')
-            if (videoElement && videoElement.srcObject) {
-              const stream = videoElement.srcObject as MediaStream
-              const videoTrack = stream.getVideoTracks()[0]
-              if (videoTrack) {
-                videoTrackRef.current = videoTrack
-                
-                // Verificar soporte de flash nuevamente
-                const capabilities = videoTrack.getCapabilities?.() as any
-                if (capabilities?.torch !== undefined) {
-                  setFlashSupported(true)
-                }
-                
-                // Restaurar el estado del flash si estaba encendido
-                if (flashEnabled) {
-                  try {
-                    await videoTrack.applyConstraints({ torch: true } as any)
-                  } catch (error) {
-                    console.log('Error restoring flash:', error)
-                  }
-                }
-              }
-            }
-          }
-        }, 300)
       } catch (error) {
         console.error('Error resuming camera:', error)
       }
     }
-  }, [cameraState, flashEnabled])
+  }, [cameraState])
 
-  const toggleFlash = useCallback(async () => {
-    if (!videoTrackRef.current) {
-      // Intentar obtener el track nuevamente
-      const container = qrCodeRegionRef.current
-      if (container) {
-        const videoElement = container.querySelector('video')
-        if (videoElement && videoElement.srcObject) {
-          const stream = videoElement.srcObject as MediaStream
-          const videoTrack = stream.getVideoTracks()[0]
-          if (videoTrack) {
-            videoTrackRef.current = videoTrack
-          }
-        }
-      }
-      
-      if (!videoTrackRef.current) {
-        toast.error('Flash no disponible', {
-          description: 'No se pudo acceder al video track',
-        })
-        return
-      }
-    }
-
-    const track = videoTrackRef.current
-    
-    // Verificar que el track esté activo
-    if (track.readyState !== 'live') {
-      toast.error('Flash no disponible', {
-        description: 'La cámara no está activa',
-      })
-      return
-    }
-
-    try {
-      const newFlashState = !flashEnabled
-      
-      // Intentar diferentes formatos según el navegador
-      try {
-        // Método 1: Formato estándar
-        await track.applyConstraints({ torch: newFlashState } as any)
-      } catch (error1) {
-        try {
-          // Método 2: Con advanced
-          await track.applyConstraints({ 
-            advanced: [{ torch: newFlashState }] 
-          } as any)
-        } catch (error2) {
-          // Método 3: Intentar con getSettings primero
-          const settings = track.getSettings() as any
-          if (settings.torch !== undefined) {
-            await track.applyConstraints({ torch: newFlashState } as any)
-          } else {
-            throw error2
-          }
-        }
-      }
-      
-      setFlashEnabled(newFlashState)
-      console.log(`Flash ${newFlashState ? 'encendido' : 'apagado'}`)
-      
-      // Verificar que realmente se aplicó
-      setTimeout(async () => {
-        try {
-          const currentSettings = track.getSettings() as any
-          if (currentSettings.torch !== newFlashState) {
-            console.warn('El estado del flash no coincide con el esperado')
-          }
-        } catch (e) {
-          // Ignorar errores de verificación
-        }
-      }, 100)
-      
-    } catch (error: any) {
-      console.error('Error toggling flash:', error)
-      const errorMessage = error.message || 'Error desconocido'
-      
-      // Si el error indica que no está soportado, actualizar el estado
-      if (errorMessage.includes('not supported') || errorMessage.includes('not readable')) {
-        setFlashSupported(false)
-        toast.error('Flash no soportado', {
-          description: 'Tu dispositivo o navegador no soporta esta función',
-        })
-      } else {
-        toast.error('No se pudo controlar el flash', {
-          description: errorMessage,
-        })
-      }
-    }
-  }, [flashEnabled])
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -726,64 +559,37 @@ export default function Scanner() {
   }, []) // Solo ejecutar una vez al montar
 
   return (
-    <div className="min-h-screen bg-gray-900">
-      {/* Header compacto - solo en modo expandido */}
-      {!compactMode && (
-        <div className="px-4 pt-4 pb-2">
-          <div className="max-w-md mx-auto flex items-center justify-between">
-            <h1 className="text-xl font-bold text-white">Fiesta China</h1>
-            <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
-              <span className="text-xs text-gray-300">{isOnline ? 'Online' : 'Offline'}</span>
-            </div>
+    <div className="min-h-screen bg-white">
+      {/* Header */}
+      <div className="px-4 pt-4 pb-2 border-b border-gray-200">
+        <div className="max-w-md mx-auto flex items-center justify-between">
+          <h1 className="text-xl font-semibold text-black">Fiesta China</h1>
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-black' : 'bg-gray-400'}`} />
+            <span className="text-xs text-gray-600">{isOnline ? 'Online' : 'Offline'}</span>
           </div>
         </div>
-      )}
+      </div>
 
-      {/* Header minimalista en modo compacto */}
-      {compactMode && cameraState === 'active' && (
-        <div className="px-4 pt-3 pb-2">
-          <div className="max-w-md mx-auto flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-400">{scannedBy || 'Operador'}</span>
-              {pendingCount > 0 && (
-                <span className="text-xs bg-yellow-900 text-yellow-200 px-2 py-0.5 rounded">
-                  {pendingCount}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
-              <button
-                onClick={() => setCompactMode(false)}
-                className="text-gray-400 hover:text-white p-1"
-                title="Mostrar controles"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                </svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Controles expandidos - solo cuando no está en modo compacto */}
-      {!compactMode && (
-        <div className="px-4 pb-4">
+      {/* Controles */}
+      <div className="px-4 pb-4 pt-4">
+        <div className="px-4 pb-4 pt-4">
           <div className="max-w-md mx-auto space-y-3">
 
-            {/* Estado de la cámara */}
-            <div className="bg-gray-800 rounded-lg p-3">
+            {/* Estado de la cámara - diseño minimalista */}
+            <div className="border border-gray-200 rounded-lg p-4 bg-white">
               <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-300">
-                  Cámara: <span className="font-medium text-white capitalize">{cameraState === 'active' ? 'Activa' : cameraState === 'paused' ? 'Pausada' : cameraState === 'starting' ? 'Iniciando...' : 'Inactiva'}</span>
-                </span>
+                <div className="flex items-center gap-3">
+                  <div className={`w-2 h-2 rounded-full ${cameraState === 'active' ? 'bg-black animate-pulse' : cameraState === 'paused' ? 'bg-gray-400' : 'bg-gray-300'}`} />
+                  <span className="text-sm text-gray-600">
+                    <span className="font-medium text-black capitalize">{cameraState === 'active' ? 'Activa' : cameraState === 'paused' ? 'Pausada' : cameraState === 'starting' ? 'Iniciando...' : 'Inactiva'}</span>
+                  </span>
+                </div>
                 <div className="flex gap-2">
                   {cameraState === 'active' && (
                     <button
                       onClick={pauseCamera}
-                      className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm font-medium"
+                      className="px-4 py-1.5 border border-gray-300 hover:border-black hover:bg-black hover:text-white text-gray-700 rounded-md text-xs font-medium transition-all"
                     >
                       Pausar
                     </button>
@@ -791,7 +597,7 @@ export default function Scanner() {
                   {cameraState === 'paused' && (
                     <button
                       onClick={resumeCamera}
-                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium"
+                      className="px-4 py-1.5 bg-black hover:bg-gray-900 text-white rounded-md text-xs font-medium transition-all"
                     >
                       Reanudar
                     </button>
@@ -799,7 +605,7 @@ export default function Scanner() {
                   {cameraState === 'idle' && (
                     <button
                       onClick={startCamera}
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium"
+                      className="px-4 py-1.5 bg-black hover:bg-gray-900 text-white rounded-md text-xs font-medium transition-all"
                     >
                       Iniciar
                     </button>
@@ -810,7 +616,7 @@ export default function Scanner() {
 
             {/* Selector de operador */}
             <div className="relative" ref={dropdownRef}>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
             Operador
           </label>
           <button
@@ -819,13 +625,13 @@ export default function Scanner() {
               setIsOperatorDropdownOpen(!isOperatorDropdownOpen)
               setShowAddOperator(false)
             }}
-            className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center justify-between"
+            className="w-full px-4 py-2 bg-white border border-gray-300 rounded-md text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black flex items-center justify-between transition-colors"
           >
-            <span className={scannedBy ? 'text-white' : 'text-gray-400'}>
+            <span className={scannedBy ? 'text-black' : 'text-gray-500'}>
               {scannedBy || 'Seleccionar operador'}
             </span>
             <svg
-              className={`w-4 h-4 text-gray-400 transition-transform ${
+              className={`w-4 h-4 text-gray-500 transition-transform ${
                 isOperatorDropdownOpen ? 'transform rotate-180' : ''
               }`}
               fill="none"
@@ -843,22 +649,22 @@ export default function Scanner() {
 
           {/* Dropdown */}
           {isOperatorDropdownOpen && (
-            <div className="absolute z-50 w-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-lg max-h-60 overflow-auto">
+            <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-60 overflow-auto">
               {operators.length > 0 ? (
                 <div className="py-1">
                   {operators.map((operator) => (
                     <div
                       key={operator}
                       onClick={() => handleSelectOperator(operator)}
-                      className={`px-4 py-2 cursor-pointer hover:bg-gray-700 flex items-center justify-between ${
-                        scannedBy === operator ? 'bg-gray-700' : ''
+                      className={`px-4 py-2 cursor-pointer hover:bg-gray-50 flex items-center justify-between transition-colors ${
+                        scannedBy === operator ? 'bg-gray-50' : ''
                       }`}
                     >
-                      <span className="text-white">{operator}</span>
+                      <span className="text-black">{operator}</span>
                       <div className="flex items-center gap-2">
                         {scannedBy === operator && (
                           <svg
-                            className="w-4 h-4 text-blue-500"
+                            className="w-4 h-4 text-black"
                             fill="none"
                             stroke="currentColor"
                             viewBox="0 0 24 24"
@@ -874,7 +680,7 @@ export default function Scanner() {
                         {operators.length > 1 && (
                           <button
                             onClick={(e) => handleRemoveOperator(operator, e)}
-                            className="text-red-400 hover:text-red-300 p-1"
+                            className="text-gray-600 hover:text-black p-1 transition-colors"
                             title="Eliminar operador"
                           >
                             <svg
@@ -897,13 +703,13 @@ export default function Scanner() {
                   ))}
                 </div>
               ) : (
-                <div className="px-4 py-2 text-gray-400 text-sm">
+                <div className="px-4 py-2 text-gray-500 text-sm">
                   No hay operadores guardados
                 </div>
               )}
 
               {/* Separador */}
-              <div className="border-t border-gray-700" />
+              <div className="border-t border-gray-200" />
 
               {/* Botón para agregar nuevo */}
               {!showAddOperator ? (
@@ -913,7 +719,7 @@ export default function Scanner() {
                     setShowAddOperator(true)
                     setNewOperatorName('')
                   }}
-                  className="w-full px-4 py-2 text-left text-blue-400 hover:bg-gray-700 flex items-center gap-2"
+                  className="w-full px-4 py-2 text-left text-black hover:bg-gray-50 flex items-center gap-2 transition-colors"
                 >
                   <svg
                     className="w-4 h-4"
@@ -938,12 +744,12 @@ export default function Scanner() {
                     onChange={(e) => setNewOperatorName(e.target.value)}
                     placeholder="Nombre del operador"
                     autoFocus
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm mb-2"
+                    className="w-full px-3 py-2 bg-white border border-gray-300 rounded-md text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black text-sm mb-2"
                   />
                   <div className="flex gap-2">
                     <button
                       type="submit"
-                      className="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium"
+                      className="flex-1 px-3 py-1.5 bg-black hover:bg-gray-800 text-white rounded-md text-sm font-medium transition-colors"
                     >
                       Agregar
                     </button>
@@ -953,7 +759,7 @@ export default function Scanner() {
                         setShowAddOperator(false)
                         setNewOperatorName('')
                       }}
-                      className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm"
+                      className="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-black rounded-md text-sm transition-colors"
                     >
                       Cancelar
                     </button>
@@ -966,15 +772,15 @@ export default function Scanner() {
 
             {/* Pendientes de sincronizar */}
             {pendingCount > 0 && (
-              <div className="bg-yellow-900/50 border border-yellow-700 rounded-lg p-3">
+              <div className="bg-gray-50 border border-gray-300 rounded-md p-3">
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-yellow-200">
+                  <span className="text-sm text-gray-700">
                     {pendingCount} {pendingCount === 1 ? 'pendiente' : 'pendientes'}
                   </span>
                   {isOnline && (
                     <button
                       onClick={() => syncPendingUses()}
-                      className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm font-medium"
+                      className="px-4 py-2 bg-black hover:bg-gray-800 text-white rounded-md text-sm font-medium transition-colors"
                     >
                       Sincronizar
                     </button>
@@ -984,178 +790,194 @@ export default function Scanner() {
             )}
           </div>
         </div>
-        )}
-
-      {/* Escáner QR - Área más grande */}
-      <div className={`mx-auto ${compactMode ? 'px-2' : 'px-4'} ${compactMode ? 'pb-2' : 'pb-4'}`}>
-        <div
-          id="qr-reader"
-          ref={qrCodeRegionRef}
-          className={`w-full bg-black ${compactMode ? 'rounded-lg' : 'rounded-xl'} overflow-hidden ${compactMode ? 'max-h-[70vh]' : 'max-h-[60vh]'}`}
-          style={{ minHeight: compactMode ? '50vh' : '40vh' }}
-        />
       </div>
 
-      {/* Botón flotante de flash - solo cuando la cámara está activa */}
-      {cameraState === 'active' && flashSupported && (
-        <button
-          onClick={toggleFlash}
-          className={`fixed bottom-20 right-4 z-50 w-14 h-14 rounded-full shadow-lg flex items-center justify-center transition-all ${
-            flashEnabled
-              ? 'bg-yellow-500 hover:bg-yellow-600 text-white'
-              : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border-2 border-gray-600'
-          }`}
-          title={flashEnabled ? 'Apagar flash' : 'Encender flash'}
-        >
-          {flashEnabled ? (
-            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M9 21c0 .5.4 1 1 1h4c.6 0 1-.5 1-1v-1H9v1zm3-18c-3.9 0-7 3.1-7 7 0 2.4 1.2 4.5 3 5.7V19c0 .6.4 1 1 1h6c.6 0 1-.4 1-1v-3.3c1.8-1.3 3-3.4 3-5.7 0-3.9-3.1-7-7-7zm1 8H11v2h2v-2zm0-4H11v2h2V7z"/>
-            </svg>
-          ) : (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
+      {/* Escáner QR */}
+      <div className="mx-auto px-4 pb-4 pt-4">
+        <div className="relative">
+          <div
+            id="qr-reader"
+            ref={qrCodeRegionRef}
+            className="w-full bg-black rounded-xl overflow-hidden shadow-xl max-h-[65vh]"
+            style={{ minHeight: '45vh' }}
+          />
+          {/* Overlay decorativo minimalista */}
+          {cameraState === 'active' && (
+            <div className="absolute inset-0 pointer-events-none">
+              <div className="absolute top-4 left-1/2 transform -translate-x-1/2">
+                <div className="w-32 h-1 bg-white/20 rounded-full"></div>
+              </div>
+            </div>
           )}
-        </button>
-      )}
-
-      {/* Botón para cambiar modo - solo cuando la cámara está activa */}
-      {cameraState === 'active' && !compactMode && (
-        <button
-          onClick={() => setCompactMode(true)}
-          className="fixed bottom-20 left-4 z-50 w-14 h-14 rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-lg flex items-center justify-center"
-          title="Modo rápido"
-        >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-          </svg>
-        </button>
-      )}
-
-      {/* Búsqueda manual - solo en modo expandido */}
-      {!compactMode && (
-        <div className="px-4 pb-4">
-          <div className="max-w-md mx-auto">
-            {!showManual ? (
-              <button
-                onClick={() => setShowManual(true)}
-                className="w-full py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-lg font-medium"
-              >
-                Búsqueda Manual
-              </button>
-            ) : (
-              <form onSubmit={handleManualSubmit} className="space-y-2">
-                <input
-                  type="text"
-                  value={manualCode}
-                  onChange={(e) => setManualCode(e.target.value)}
-                  placeholder="Ingresa código QR manualmente"
-                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  autoFocus
-                />
-                <div className="flex gap-2">
-                  <button
-                    type="submit"
-                    className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
-                  >
-                    Buscar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowManual(false)
-                      setManualCode('')
-                    }}
-                    className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
-            )}
-          </div>
         </div>
-      )}
+      </div>
 
-      {/* Historial - Colapsable */}
-      {!compactMode && (
+
+      {/* Búsqueda manual */}
+      <div className="px-4 pb-4">
+        <div className="max-w-md mx-auto">
+          {!showManual ? (
+            <button
+              onClick={() => setShowManual(true)}
+              className="w-full py-3 border border-black hover:bg-black hover:text-white text-black rounded-md font-medium transition-colors"
+            >
+              Búsqueda Manual
+            </button>
+          ) : (
+            <form onSubmit={handleManualSubmit} className="space-y-2">
+              <input
+                type="text"
+                value={manualCode}
+                onChange={(e) => setManualCode(e.target.value)}
+                placeholder="Ingresa código QR manualmente"
+                className="w-full px-4 py-2 bg-white border border-gray-300 rounded-md text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black transition-colors"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  className="flex-1 py-2 bg-black hover:bg-gray-800 text-white rounded-md font-medium transition-colors"
+                >
+                  Buscar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowManual(false)
+                    setManualCode('')
+                  }}
+                  className="flex-1 py-2 border border-gray-300 hover:bg-gray-50 text-black rounded-md transition-colors"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Historial - Siempre visible */}
+      <div className="px-4 pb-4">
         <div className="px-4 pb-4">
           <div className="max-w-md mx-auto">
-            <button
-              onClick={() => setShowHistory(!showHistory)}
-              className="w-full flex items-center justify-between py-2 px-4 bg-gray-800 rounded-lg hover:bg-gray-700 mb-2"
-            >
-              <h2 className="text-base font-bold text-white">
+            {/* Título del historial */}
+            <div className="mb-3">
+              <h2 className="text-base font-semibold text-black mb-3">
                 Historial {history.length > 0 && `(${history.length})`}
               </h2>
-              <svg
-                className={`w-5 h-5 text-gray-400 transition-transform ${showHistory ? 'transform rotate-180' : ''}`}
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </button>
-            {showHistory && (
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-          {history.length > 0 ? (
-            history.map((item, index) => (
-              <div
-                key={`${item.qrCode}-${item.scannedAt}-${index}`}
-                className="bg-gray-800 rounded-lg p-3 text-sm border-l-4 border-green-500"
-              >
-                {item.ticket && (
-                  <>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-white font-semibold">{item.ticket.holder_name}</span>
-                      <span className="px-2 py-1 rounded text-xs bg-green-900 text-green-200">
-                        Usado
-                      </span>
-                    </div>
-                    <div className="space-y-1 text-xs text-gray-300">
-                      {item.ticket.used_at && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-gray-400">Escaneado:</span>
-                          <span className="text-white">
-                            {new Date(item.ticket.used_at).toLocaleString('es-AR', {
-                              day: '2-digit',
-                              month: '2-digit',
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                              second: '2-digit'
-                            })}
-                          </span>
-                        </div>
-                      )}
-                      {item.ticket.scanned_by && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-gray-400">Por:</span>
-                          <span className="text-white">{item.ticket.scanned_by}</span>
-                        </div>
-                      )}
-                      {item.ticket.ticket_type && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-gray-400">Tipo:</span>
-                          <span className="text-white">{item.ticket.ticket_type}</span>
-                        </div>
-                      )}
-                    </div>
-                  </>
+              
+              {/* Buscador */}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={historySearchTerm}
+                  onChange={(e) => setHistorySearchTerm(e.target.value)}
+                  placeholder="Buscar por nombre o apellido..."
+                  className="w-full px-4 py-2 pl-10 bg-white border border-gray-300 rounded-md text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black transition-colors text-sm"
+                />
+                <svg
+                  className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                {historySearchTerm && (
+                  <button
+                    onClick={() => setHistorySearchTerm('')}
+                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-black transition-colors"
+                    title="Limpiar búsqueda"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
                 )}
               </div>
-            ))
-              ) : (
-                <div className="bg-gray-800 rounded-lg p-4 text-center text-gray-400 text-sm">
-                  No hay tickets escaneados todavía
-                </div>
-              )}
-              </div>
-            )}
+            </div>
+
+            {/* Lista de historial - sin scroll, todos los items */}
+            <div className="space-y-2">
+              {(() => {
+                // Filtrar historial basado en la búsqueda
+                const filteredHistory = historySearchTerm.trim()
+                  ? history.filter((item) => {
+                      if (!item.ticket?.holder_name) return false
+                      const searchLower = historySearchTerm.toLowerCase().trim()
+                      const nameLower = item.ticket.holder_name.toLowerCase()
+                      // Buscar por nombre completo o por palabras individuales
+                      const nameWords = nameLower.split(/\s+/)
+                      return nameLower.includes(searchLower) || 
+                             nameWords.some(word => word.startsWith(searchLower))
+                    })
+                  : history
+
+                if (filteredHistory.length > 0) {
+                  return filteredHistory.map((item, index) => (
+                    <div
+                      key={`${item.qrCode}-${item.scannedAt}-${index}`}
+                      className="bg-white border border-gray-200 rounded-md p-3 text-sm border-l-4 border-black"
+                    >
+                      {item.ticket && (
+                        <>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-black font-semibold">{item.ticket.holder_name}</span>
+                            <span className="px-2 py-1 rounded text-xs bg-black text-white font-medium">
+                              Usado
+                            </span>
+                          </div>
+                          <div className="space-y-1 text-xs text-gray-600">
+                            {item.ticket.used_at && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500">Escaneado:</span>
+                                <span className="text-black">
+                                  {new Date(item.ticket.used_at).toLocaleString('es-AR', {
+                                    day: '2-digit',
+                                    month: '2-digit',
+                                    year: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit'
+                                  })}
+                                </span>
+                              </div>
+                            )}
+                            {item.ticket.scanned_by && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500">Por:</span>
+                                <span className="text-black">{item.ticket.scanned_by}</span>
+                              </div>
+                            )}
+                            {item.ticket.ticket_type && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500">Tipo:</span>
+                                <span className="text-black">{item.ticket.ticket_type}</span>
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ))
+                } else if (history.length === 0) {
+                  return (
+                    <div className="bg-white border border-gray-200 rounded-md p-4 text-center text-gray-500 text-sm">
+                      No hay tickets escaneados todavía
+                    </div>
+                  )
+                } else {
+                  return (
+                    <div className="bg-white border border-gray-200 rounded-md p-4 text-center text-gray-500 text-sm">
+                      No se encontraron resultados para "{historySearchTerm}"
+                    </div>
+                  )
+                }
+              })()}
+            </div>
           </div>
         </div>
-      )}
+      </div>
 
     </div>
   )
