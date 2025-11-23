@@ -192,9 +192,25 @@ export default function Scanner() {
             duration: 2000, // Más rápido
           })
         } else {
-          // Marcar como usado localmente (usar 'Operador' como default si no hay nombre)
-          const operatorName = scannedBy.trim() || 'Operador'
-          await markLocallyUsed(ticket.id, operatorName)
+          // Obtener el operador desde localStorage directamente para asegurar que siempre se use el correcto
+          // Esto previene problemas de timing donde el estado aún no se ha cargado
+          const savedOperator = localStorage.getItem(SELECTED_OPERATOR_KEY)
+          const currentOperator = scannedBy.trim()
+          const operatorName = (savedOperator || currentOperator || '').trim()
+          
+          if (!operatorName) {
+            console.warn('No se encontró operador configurado, usando "Operador" como default')
+          }
+          
+          // Si el operador en localStorage es diferente al estado, actualizar el estado
+          if (savedOperator && savedOperator.trim() !== currentOperator) {
+            setScannedBy(savedOperator.trim())
+          }
+          
+          // Usar el operador encontrado o 'Operador' como último recurso
+          const finalOperatorName = operatorName || 'Operador'
+          
+          await markLocallyUsed(ticket.id, finalOperatorName)
           
           // Obtener el ticket actualizado después de marcarlo como usado
           const updatedTicket = await findByIdentifier(ticket.qr_code)
@@ -202,7 +218,7 @@ export default function Scanner() {
             ...ticket,
             is_used: true,
             used_at: new Date().toISOString(),
-            scanned_by: operatorName,
+            scanned_by: finalOperatorName,
             updated_at: new Date().toISOString()
           }
           
@@ -433,31 +449,31 @@ export default function Scanner() {
   }
 
 
-  // Cargar operadores y operador seleccionado desde localStorage
+  // Cargar operadores y operador seleccionado desde localStorage (síncrono al montar)
   useEffect(() => {
     try {
       const savedOperators = localStorage.getItem(OPERATORS_STORAGE_KEY)
       const savedSelected = localStorage.getItem(SELECTED_OPERATOR_KEY)
       
-      // Cargar lista de operadores
+      // PRIMERO: Cargar operador seleccionado (prioridad)
+      if (savedSelected && savedSelected.trim()) {
+        setScannedBy(savedSelected.trim())
+      }
+      
+      // SEGUNDO: Cargar lista de operadores
       if (savedOperators) {
         try {
           const operatorsList = JSON.parse(savedOperators)
           setOperators(operatorsList)
+          
+          // Si no había operador guardado pero hay operadores, seleccionar el primero
+          if (!savedSelected && operatorsList.length > 0) {
+            const firstOperator = operatorsList[0]
+            setScannedBy(firstOperator)
+            localStorage.setItem(SELECTED_OPERATOR_KEY, firstOperator)
+          }
         } catch (error) {
           console.error('Error loading operators list:', error)
-        }
-      }
-      
-      // Cargar operador seleccionado (siempre, incluso si no está en la lista)
-      if (savedSelected) {
-        setScannedBy(savedSelected)
-      } else {
-        // Si no hay operador guardado pero hay operadores, seleccionar el primero
-        const operatorsList = savedOperators ? JSON.parse(savedOperators) : []
-        if (operatorsList.length > 0) {
-          setScannedBy(operatorsList[0])
-          localStorage.setItem(SELECTED_OPERATOR_KEY, operatorsList[0])
         }
       }
     } catch (error) {
