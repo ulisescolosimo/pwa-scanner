@@ -36,6 +36,21 @@ export default function HistoryDrawer({ isOpen, onClose, history, onSearch }: Hi
         onSearch(term)
     }
 
+    // Filtrar solo las escaneadas correctamente (status === 'available' o tickets con scanned_by)
+    const validHistory = history.filter(item => {
+        if (item.status === 'available') return true
+        if (item.ticket && item.ticket.scanned_by && item.status === 'used') return true
+        return false
+    })
+
+    // Aplicar búsqueda si hay término
+    const filteredHistory = searchTerm.trim()
+        ? validHistory.filter(item => {
+            if (!item.ticket) return false
+            return item.ticket.holder_name?.toLowerCase().includes(searchTerm.toLowerCase())
+        })
+        : validHistory
+
     if (!isVisible && !isOpen) return null
 
     return (
@@ -62,7 +77,7 @@ export default function HistoryDrawer({ isOpen, onClose, history, onSearch }: Hi
                     <div className="flex items-center justify-between mb-4">
                         <h2 className="text-xl font-bold text-white">Historial</h2>
                         <span className="text-xs font-medium px-2.5 py-1 bg-white/10 rounded-full text-white/60">
-                            {history.length} scans
+                            {filteredHistory.length} scans
                         </span>
                     </div>
 
@@ -83,29 +98,20 @@ export default function HistoryDrawer({ isOpen, onClose, history, onSearch }: Hi
 
                 {/* List */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-3 safe-pb">
-                    {history.length > 0 ? (
-                        history.map((item, index) => (
+                    {filteredHistory.length > 0 ? (
+                        filteredHistory.map((item, index) => (
                             <div
                                 key={`${item.qrCode}-${index}`}
                                 className="bg-surface-light/50 border border-white/5 rounded-xl p-4 flex items-start gap-4 active:bg-surface-light transition-colors"
                             >
-                                <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${item.status === 'used' ? 'bg-yellow-500/20 text-yellow-500' :
-                                        item.status === 'available' ? 'bg-success/20 text-success' :
-                                            'bg-error/20 text-error'
-                                    }`}>
-                                    {item.status === 'used' ? (
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                        </svg>
-                                    ) : (
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                        </svg>
-                                    )}
+                                <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-success/20 text-success">
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
                                 </div>
 
                                 <div className="flex-1 min-w-0">
-                                    {item.ticket ? (
+                                    {item.ticket && (
                                         <>
                                             <h3 className="text-white font-medium truncate">
                                                 {item.ticket.holder_name}
@@ -120,15 +126,6 @@ export default function HistoryDrawer({ isOpen, onClose, history, onSearch }: Hi
                                                     Por: {item.ticket.scanned_by}
                                                 </div>
                                             )}
-                                        </>
-                                    ) : (
-                                        <>
-                                            <h3 className="text-white font-medium truncate">
-                                                Ticket no encontrado
-                                            </h3>
-                                            <p className="text-xs text-gray-400 mt-1">
-                                                {new Date(item.scannedAt).toLocaleTimeString()}
-                                            </p>
                                         </>
                                     )}
                                 </div>

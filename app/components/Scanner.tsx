@@ -63,7 +63,8 @@ export default function Scanner() {
       const historyItems: HistoryItem[] = usedTickets
         .map(ticket => ({
           ticket,
-          status: 'used' as const,
+          // Marcar como 'available' si fue escaneado correctamente (tiene scanned_by)
+          status: (ticket.scanned_by ? 'available' : 'used') as 'available' | 'used' | 'not_found',
           scannedAt: ticket.used_at || ticket.updated_at || ticket.created_at,
           qrCode: ticket.qr_code
         }))
