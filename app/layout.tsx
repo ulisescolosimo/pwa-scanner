@@ -1,14 +1,23 @@
-import type { Metadata } from "next"
+import type { Metadata, Viewport } from "next"
+import { Inter } from "next/font/google"
 import "./globals.css"
 import ServiceWorkerRegistration from "./components/ServiceWorkerRegistration"
 import { Toaster } from "sonner"
+
+const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  themeColor: "#0a0a0a",
+}
 
 export const metadata: Metadata = {
   title: "PWA Scanner - Control de Entradas",
   description: "Aplicación PWA para control de entradas en eventos",
   manifest: "/manifest.webmanifest",
-  themeColor: "#0a0a0a",
-  viewport: "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -34,9 +43,8 @@ export default function RootLayout({
     <html lang="es">
       <head>
         <link rel="manifest" href="/manifest.webmanifest" />
-        <meta name="theme-color" content="#0a0a0a" />
       </head>
-      <body>
+      <body className={`${inter.variable} font-sans antialiased`}>
         <ServiceWorkerRegistration />
         <Toaster position="top-center" richColors />
         {children}
