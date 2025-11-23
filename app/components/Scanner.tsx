@@ -354,7 +354,7 @@ export default function Scanner() {
             </button>
 
             {showOperatorMenu && (
-              <div className="absolute right-0 mt-2 w-48 bg-surface border border-white/10 rounded-xl shadow-xl overflow-hidden animate-fade-in">
+              <div className="absolute right-0 mt-2 w-64 sm:w-56 bg-surface border border-white/10 rounded-xl shadow-xl overflow-hidden animate-fade-in z-50">
                 <div className="p-2 space-y-1">
                   {operators.map(op => (
                     <button
@@ -367,15 +367,18 @@ export default function Scanner() {
                     </button>
                   ))}
                   <div className="border-t border-white/10 my-1" />
-                  <form onSubmit={handleAddOperator} className="flex gap-1">
+                  <form onSubmit={handleAddOperator} className="flex gap-1.5 items-center">
                     <input
                       type="text"
                       value={newOperatorName}
                       onChange={e => setNewOperatorName(e.target.value)}
                       placeholder="Nuevo..."
-                      className="flex-1 bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-primary"
+                      className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-white/50 focus:outline-none focus:border-primary"
                     />
-                    <button type="submit" className="bg-primary text-white px-2 rounded text-xs">
+                    <button 
+                      type="submit" 
+                      className="flex-shrink-0 bg-primary text-white px-3 py-1.5 rounded-lg text-xs font-medium active:scale-95 transition-transform"
+                    >
                       +
                     </button>
                   </form>

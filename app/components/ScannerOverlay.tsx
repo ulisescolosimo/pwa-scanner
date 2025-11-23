@@ -78,37 +78,37 @@ export default function ScannerOverlay({ status, message, subMessage }: ScannerO
                     }`}
                 >
                     <div 
-                        className={`transform transition-all duration-500 ${
+                        className={`flex flex-col items-center justify-center transform transition-all duration-500 ${
                             isAnimating 
                                 ? 'scale-100 opacity-100' 
                                 : 'scale-75 opacity-0'
                         }`}
                     >
                         {/* Icon */}
-                        <div className={`w-32 h-32 rounded-full flex items-center justify-center mb-6 shadow-2xl ${
+                        <div className={`w-32 h-32 rounded-full flex items-center justify-center mb-6 shadow-2xl mx-auto ${
                             status === 'success' ? 'bg-success text-white' :
                             status === 'error' ? 'bg-error text-white' :
                             'bg-yellow-500 text-white'
                         }`}>
                             {status === 'success' && (
-                                <svg className="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                                 </svg>
                             )}
                             {status === 'error' && (
-                                <svg className="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
                                 </svg>
                             )}
                             {status === 'used' && (
-                                <svg className="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                                 </svg>
                             )}
                         </div>
 
                         {/* Text */}
-                        <div className="text-center">
+                        <div className="text-center w-full">
                             <h2 className="text-3xl font-bold text-white mb-2 drop-shadow-lg">
                                 {message}
                             </h2>
