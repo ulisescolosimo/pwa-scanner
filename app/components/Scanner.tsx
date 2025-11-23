@@ -433,36 +433,44 @@ export default function Scanner() {
   }
 
 
-  // Cargar operadores y seleccionado desde localStorage
+  // Cargar operadores y operador seleccionado desde localStorage
   useEffect(() => {
-    const savedOperators = localStorage.getItem(OPERATORS_STORAGE_KEY)
-    const savedSelected = localStorage.getItem(SELECTED_OPERATOR_KEY)
-    
-    if (savedOperators) {
-      try {
-        const operatorsList = JSON.parse(savedOperators)
-        setOperators(operatorsList)
-        
-        // Si hay un operador guardado, seleccionarlo
-        if (savedSelected && operatorsList.includes(savedSelected)) {
-          setScannedBy(savedSelected)
-        } else if (operatorsList.length > 0) {
-          // Si no hay guardado pero hay operadores, seleccionar el primero
+    try {
+      const savedOperators = localStorage.getItem(OPERATORS_STORAGE_KEY)
+      const savedSelected = localStorage.getItem(SELECTED_OPERATOR_KEY)
+      
+      // Cargar lista de operadores
+      if (savedOperators) {
+        try {
+          const operatorsList = JSON.parse(savedOperators)
+          setOperators(operatorsList)
+        } catch (error) {
+          console.error('Error loading operators list:', error)
+        }
+      }
+      
+      // Cargar operador seleccionado (siempre, incluso si no está en la lista)
+      if (savedSelected) {
+        setScannedBy(savedSelected)
+      } else {
+        // Si no hay operador guardado pero hay operadores, seleccionar el primero
+        const operatorsList = savedOperators ? JSON.parse(savedOperators) : []
+        if (operatorsList.length > 0) {
           setScannedBy(operatorsList[0])
           localStorage.setItem(SELECTED_OPERATOR_KEY, operatorsList[0])
         }
-      } catch (error) {
-        console.error('Error loading operators:', error)
       }
+    } catch (error) {
+      console.error('Error loading configuration:', error)
     }
   }, [])
 
-  // Guardar operador seleccionado cuando cambia
+  // Guardar operador seleccionado cuando cambia (siempre, incluso si no está en la lista)
   useEffect(() => {
-    if (scannedBy && operators.includes(scannedBy)) {
-      localStorage.setItem(SELECTED_OPERATOR_KEY, scannedBy)
+    if (scannedBy && scannedBy.trim()) {
+      localStorage.setItem(SELECTED_OPERATOR_KEY, scannedBy.trim())
     }
-  }, [scannedBy, operators])
+  }, [scannedBy])
 
   // Guardar lista de operadores cuando cambia
   useEffect(() => {
@@ -487,7 +495,10 @@ export default function Scanner() {
   }, [])
 
   const handleSelectOperator = (operator: string) => {
-    setScannedBy(operator)
+    const trimmedOperator = operator.trim()
+    setScannedBy(trimmedOperator)
+    // Guardar inmediatamente en localStorage
+    localStorage.setItem(SELECTED_OPERATOR_KEY, trimmedOperator)
     setIsOperatorDropdownOpen(false)
     setShowAddOperator(false)
   }
@@ -500,12 +511,16 @@ export default function Scanner() {
       const updatedOperators = [...operators, trimmedName]
       setOperators(updatedOperators)
       setScannedBy(trimmedName)
+      // Guardar inmediatamente en localStorage
+      localStorage.setItem(SELECTED_OPERATOR_KEY, trimmedName)
       setNewOperatorName('')
       setShowAddOperator(false)
       setIsOperatorDropdownOpen(false)
     } else if (trimmedName && operators.includes(trimmedName)) {
       // Si ya existe, simplemente seleccionarlo
       setScannedBy(trimmedName)
+      // Guardar inmediatamente en localStorage
+      localStorage.setItem(SELECTED_OPERATOR_KEY, trimmedName)
       setNewOperatorName('')
       setShowAddOperator(false)
       setIsOperatorDropdownOpen(false)
@@ -520,9 +535,12 @@ export default function Scanner() {
     // Si el operador eliminado era el seleccionado, seleccionar otro o limpiar
     if (scannedBy === operator) {
       if (updatedOperators.length > 0) {
-        setScannedBy(updatedOperators[0])
+        const newOperator = updatedOperators[0]
+        setScannedBy(newOperator)
+        localStorage.setItem(SELECTED_OPERATOR_KEY, newOperator)
       } else {
         setScannedBy('')
+        localStorage.removeItem(SELECTED_OPERATOR_KEY)
       }
     }
   }
