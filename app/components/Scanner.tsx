@@ -190,13 +190,12 @@ export default function Scanner() {
         scannedAt: new Date().toISOString()
       }
 
+      // Solo agregar al historial los tickets escaneados correctamente (disponibles que fueron marcados como usados)
       if (status === 'available' && processedTicket?.is_used) {
         await loadUsedTicketsHistory()
         if (isOnline) syncPendingUses()
-      } else {
-        const historyItem: HistoryItem = { ...result, qrCode }
-        setHistory(prev => [historyItem, ...prev].slice(0, 50))
       }
+      // No agregar al historial los tickets ya usados o no encontrados
 
     } catch (error) {
       console.error('Error processing scan:', error)
