@@ -81,15 +81,26 @@ export default function Scanner() {
     return () => clearTimeout(timer)
   }, [loadUsedTicketsHistory])
 
+  // Recargar historial cuando cambia el estado online/offline
+  useEffect(() => {
+    loadUsedTicketsHistory()
+  }, [isOnline, loadUsedTicketsHistory])
+
+  // Recargar periódicamente cuando está online
   useEffect(() => {
     if (!isOnline) return
     const interval = setInterval(loadUsedTicketsHistory, 10000)
     return () => clearInterval(interval)
   }, [isOnline, loadUsedTicketsHistory])
 
+  // Recargar cuando se sincronizan todos los pendientes
   useEffect(() => {
-    if (pendingCount === 0) loadUsedTicketsHistory()
-  }, [pendingCount, loadUsedTicketsHistory])
+    if (pendingCount === 0 && isOnline) {
+      // Pequeño delay para asegurar que los datos se hayan actualizado en IndexedDB
+      const timer = setTimeout(loadUsedTicketsHistory, 500)
+      return () => clearTimeout(timer)
+    }
+  }, [pendingCount, isOnline, loadUsedTicketsHistory])
 
   const triggerHaptic = (type: 'success' | 'error' | 'warning') => {
     if (navigator.vibrate) {

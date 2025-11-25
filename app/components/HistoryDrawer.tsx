@@ -77,7 +77,7 @@ export default function HistoryDrawer({ isOpen, onClose, history, onSearch }: Hi
                     <div className="flex items-center justify-between mb-4">
                         <h2 className="text-xl font-bold text-white">Historial</h2>
                         <span className="text-xs font-medium px-2.5 py-1 bg-white/10 rounded-full text-white/60">
-                            {filteredHistory.length} scans
+                            {filteredHistory.length} QR
                         </span>
                     </div>
 
