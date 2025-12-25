@@ -229,11 +229,33 @@ export default function Scanner() {
       container.innerHTML = ''
       await new Promise(resolve => setTimeout(resolve, 200))
 
-      const html5QrCode = new Html5Qrcode('qr-reader')
-      const qrboxSize = Math.min(window.innerWidth, window.innerHeight) * 0.75
+      // Configuración mejorada para optimizar la detección de QR:
+      // - useBarCodeDetectorIfSupported: Usa la API nativa del navegador si está disponible (más rápida y precisa)
+      // - experimentalFeatures: Habilita características experimentales para mejor rendimiento
+      const html5QrCode = new Html5Qrcode('qr-reader', {
+        verbose: false,
+        useBarCodeDetectorIfSupported: true,
+        experimentalFeatures: {
+          useBarCodeDetectorIfSupported: true
+        }
+      })
+
+      // Video constraints optimizados para mejor calidad de captura:
+      // - Resolución más alta (1280x720 ideal) para mejor detección de códigos pequeños o lejanos
+      // - focusMode: 'continuous' mantiene el enfoque automático activo
+      const videoConstraints: MediaTrackConstraints = {
+        facingMode: 'environment',
+        width: { ideal: 1280, min: 640 },
+        height: { ideal: 720, min: 480 },
+        // focusMode está disponible en navegadores modernos pero no tipado en TypeScript
+        ...({ focusMode: 'continuous' } as any),
+      }
+
+      // Área de escaneo aumentada al 80% (antes 75%) para capturar códigos más fácilmente
+      const qrboxSize = Math.min(window.innerWidth, window.innerHeight) * 0.8
 
       await html5QrCode.start(
-        { facingMode: 'environment' },
+        videoConstraints,
         {
           fps: 30,
           qrbox: { width: qrboxSize, height: qrboxSize },
