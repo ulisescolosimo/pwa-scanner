@@ -229,61 +229,20 @@ export default function Scanner() {
       container.innerHTML = ''
       await new Promise(resolve => setTimeout(resolve, 200))
 
-      // Configuración mejorada para optimizar la detección de QR:
-      // - useBarCodeDetectorIfSupported: Usa la API nativa del navegador si está disponible (más rápida y precisa)
-      // - experimentalFeatures: Habilita características experimentales para mejor rendimiento
-      const html5QrCode = new Html5Qrcode('qr-reader', {
-        verbose: false,
-        useBarCodeDetectorIfSupported: true,
-        experimentalFeatures: {
-          useBarCodeDetectorIfSupported: true
-        }
-      })
+      const html5QrCode = new Html5Qrcode('qr-reader')
+      const qrboxSize = Math.min(window.innerWidth, window.innerHeight) * 0.75
 
-      // Área de escaneo aumentada al 80% (antes 75%) para capturar códigos más fácilmente
-      const qrboxSize = Math.min(window.innerWidth, window.innerHeight) * 0.8
-
-      // Intentar primero con constraints optimizados, luego fallback a configuración básica
-      const tryStartCamera = async (constraints: MediaTrackConstraints | string) => {
-        await html5QrCode.start(
-          constraints,
-          {
-            fps: 30,
-            qrbox: { width: qrboxSize, height: qrboxSize },
-            aspectRatio: window.innerHeight / window.innerWidth,
-            disableFlip: false,
-          },
-          (decodedText) => processScan(decodedText),
-          () => { }
-        )
-      }
-
-      try {
-        // Intento 1: Constraints optimizados (mayor resolución y enfoque continuo)
-        const optimizedConstraints: MediaTrackConstraints = {
-          facingMode: 'environment',
-          width: { ideal: 1280, min: 640 },
-          height: { ideal: 720, min: 480 },
-          // focusMode está disponible en navegadores modernos pero no tipado en TypeScript
-          ...({ focusMode: 'continuous' } as any),
-        }
-        await tryStartCamera(optimizedConstraints)
-      } catch (error1) {
-        console.warn('No se pudo iniciar con constraints optimizados, intentando configuración básica:', error1)
-        try {
-          // Intento 2: Constraints básicos con resolución ideal pero sin focusMode
-          const basicConstraints: MediaTrackConstraints = {
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          }
-          await tryStartCamera(basicConstraints)
-        } catch (error2) {
-          console.warn('No se pudo iniciar con constraints básicos, intentando configuración mínima:', error2)
-          // Intento 3: Solo facingMode (compatible con todos los dispositivos)
-          await tryStartCamera({ facingMode: 'environment' })
-        }
-      }
+      await html5QrCode.start(
+        { facingMode: 'environment' },
+        {
+          fps: 30,
+          qrbox: { width: qrboxSize, height: qrboxSize },
+          aspectRatio: window.innerHeight / window.innerWidth,
+          disableFlip: false,
+        },
+        (decodedText) => processScan(decodedText),
+        () => { }
+      )
 
       scannerRef.current = html5QrCode
       setCameraState('active')
